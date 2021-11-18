@@ -19,21 +19,27 @@ import static ru.mail.polis.service.vladislav_fetisov.MyService.V_0_REPLICATION;
 import static ru.mail.polis.service.vladislav_fetisov.MyService.logger;
 
 public class ReplicasManager {
-    public static final int TIMEOUT_MILLIS = 100;
+    private static final int TIMEOUT_MILLIS = 100;
+    private static final ExecutorService replicaExecutor = Executors.newFixedThreadPool(8);
     private final int ack;
     private final int from;
+    private final int indexOfPort;
+    private final int indexOfOurPort;
     private final Topology topology;
-    private final ExecutorService replicaExecutor = Executors.newFixedThreadPool(8);
 
-    private ReplicasManager(int ack, int from, Topology topology) {
+    private ReplicasManager(int ack, int from, Topology topology, int indexOfPort, int indexOfOurPort) {
         this.ack = ack;
         this.from = from;
         this.topology = topology;
+        this.indexOfPort = indexOfPort;
+        this.indexOfOurPort = indexOfOurPort;
     }
 
-    public static ReplicasManager parseReplicas(String replicas, Topology topology) throws IllegalArgumentException {
+    public static ReplicasManager parseReplicas(
+            String replicas, Topology topology, int indexOfPort, int indexOfOurPort) throws IllegalArgumentException {
         if (replicas == null) {
-            return new ReplicasManager(topology.getQuorum(), topology.getSortedPorts().length, topology);
+            return new ReplicasManager(
+                    topology.getQuorum(), topology.getSortedPorts().length, topology, indexOfPort, indexOfOurPort);
         }
         int i = replicas.indexOf('/');
         int ack = Integer.parseInt(replicas.substring(0, i));
@@ -45,10 +51,10 @@ public class ReplicasManager {
             throw new IllegalArgumentException(
                     String.format("ack is out of bounds, ack =%d where from = %d", ack, from));
         }
-        return new ReplicasManager(ack, from, topology);
+        return new ReplicasManager(ack, from, topology, indexOfPort, indexOfOurPort);
     }
 
-    public boolean currentNodeIsReplica(int indexOfPort, int indexOfOurPort) {
+    public boolean currentNodeIsReplica() {
         int rightBoundIndex = (indexOfPort + from - 1) % topology.getSortedPorts().length;
         if (rightBoundIndex < indexOfPort) {
             return indexOfOurPort >= indexOfPort || indexOfOurPort <= rightBoundIndex;
@@ -64,7 +70,7 @@ public class ReplicasManager {
         while (true) {
             currentPort = sortedPorts[indexOfPort];
             try {
-                return topology.getClientByPort(currentPort).invoke(request, TIMEOUT_MILLIS);
+                return topology.getClientByPort(currentPort).invoke(request, TIMEOUT_MILLIS);//FIXME not async
             } catch (PoolException | IOException | HttpException e) {
                 logger.error("Response from partition on port: " + currentPort, e);
                 if ((from - ++i) < ack) {
@@ -86,9 +92,8 @@ public class ReplicasManager {
         return req;
     }
 
-    public Response[] processRequestWithReplication(
-            Request request, String id, int indexOfPort, int indexOfOurPort) throws InterruptedException {
-        ResponsesWithSync responsesWithSync = forwardRequestToReplicas(request, id, indexOfPort, indexOfOurPort);
+    public Response[] processRequestWithReplication(Request request, String id) throws InterruptedException {
+        ResponsesWithSync responsesWithSync = forwardRequestToReplicas(request, id);
         responsesWithSync.lock.lock();
         try {
             Response[] responses = responsesWithSync.responses;
@@ -104,7 +109,7 @@ public class ReplicasManager {
         return responsesWithSync.responses;
     }
 
-    private ResponsesWithSync forwardRequestToReplicas(Request request, String id, int indexOfPort, int indexOfOurPort) {
+    private ResponsesWithSync forwardRequestToReplicas(Request request, String id) {
         Request req = ReplicasManager.createReplicaRequest(request, id);
         int[] sortedPorts = topology.getSortedPorts();
 

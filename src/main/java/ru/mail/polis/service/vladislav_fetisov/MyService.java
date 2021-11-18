@@ -94,16 +94,15 @@ public class MyService extends HttpServer implements Service {
         if (id.isBlank()) {
             return new Response(Response.BAD_REQUEST, Response.EMPTY);
         }
-        ReplicasManager replicasManager = ReplicasManager.parseReplicas(replicas, topology);
-
         int port = topology.findPort(Utils.getHash(id));
         int indexOfPort = topology.indexOfSortedPort(port);
         int indexOfOurPort = topology.indexOfSortedPort(this.port);
+        ReplicasManager replicasManager = ReplicasManager.parseReplicas(replicas, topology, indexOfPort, indexOfOurPort);
 
-        if (!replicasManager.currentNodeIsReplica(indexOfPort, indexOfOurPort)) {
+        if (!replicasManager.currentNodeIsReplica()) {
             return replicasManager.sendToAvailableReplica(request, indexOfPort);
         }
-        Response[] responses = replicasManager.processRequestWithReplication(request, id, indexOfPort, indexOfOurPort);
+        Response[] responses = replicasManager.processRequestWithReplication(request, id);
         if (responses.length == 0) {
             return new Response(Response.GATEWAY_TIMEOUT, Response.EMPTY);
         }
