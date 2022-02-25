@@ -29,6 +29,7 @@ import ru.mail.polis.lsm.DAOConfig;
 import ru.mail.polis.lsm.DAOFactory;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 
@@ -147,6 +148,17 @@ class SingleNodeTest extends TestBase {
         });
     }
 
+//            // Insert
+//            assertEquals(201, upsert(key1, value1).getStatus());
+//            assertEquals(201, upsert(key2, value2).getStatus());
+//            assertEquals(201, upsert(key3, value3).getStatus());
+//            client.post("/v0/entity?id=1");
+//            // Check
+//            final Response response = get(key2);
+//            assertEquals(200, response.getStatus());
+//            assertArrayEquals(value2, response.getBody());
+//        });
+//    }
     @Test
     void insertEmpty() {
         assertTimeoutPreemptively(TIMEOUT, () -> {
