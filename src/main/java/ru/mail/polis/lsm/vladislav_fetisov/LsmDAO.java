@@ -6,6 +6,7 @@ import ru.mail.polis.lsm.Record;
 
 import javax.annotation.Nullable;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -34,17 +35,38 @@ public class LsmDAO implements DAO {
         Iterator<Record> memRange = map(fromKey, toKey, storage);
         Iterator<Record> SSTablesRange = SSTablesRange(fromKey, toKey);
         PeekingIterator<Record> result = mergeTwo(new PeekingIterator<>(SSTablesRange), new PeekingIterator<>(memRange));
-        return filteredResult(result); //FIXME
+        return filteredResult(result);
     }
 
     private Iterator<Record> filteredResult(PeekingIterator<Record> result) {
-        List<Record> filteredResult = new ArrayList<>();
-        result.forEachRemaining((record) -> {
-            if (!record.isTombstone()) {
-                filteredResult.add(record);
+        return new Iterator<>() {
+
+            @Override
+            public boolean hasNext() {
+                if (!result.hasNext()) {
+                    return false;
+                }
+                Record peek = result.peek();
+                while (peek.isTombstone()) {
+                    if (!result.hasNext()) {
+                        return false;
+                    }
+                    result.next();
+                    if (!result.hasNext()) {
+                        return false;
+                    }
+                }
+                return true;
             }
-        });
-        return filteredResult.iterator();
+
+            @Override
+            public Record next() {
+                if (!hasNext()) {
+                    throw new NoSuchElementException();
+                }
+                return result.next();
+            }
+        };
     }
 
     private Iterator<Record> SSTablesRange(@Nullable ByteBuffer fromKey, @Nullable ByteBuffer toKey) {
@@ -57,18 +79,22 @@ public class LsmDAO implements DAO {
 
     @Override
     public void upsert(Record record) {
-        synchronized (this) {
-            int size = sizeOf(record);
-            if (memoryConsumption.get() + size > DAOConfig.DEFAULT_MEMORY_LIMIT) {
-                try {
-                    flush();
-                } catch (IOException e) {
-                    e.printStackTrace();
+        int size = sizeOf(record);
+        if (memoryConsumption.addAndGet(size) > DAOConfig.DEFAULT_MEMORY_LIMIT) {
+            synchronized (this) {
+                int prev = memoryConsumption.get();
+                if (prev > DAOConfig.DEFAULT_MEMORY_LIMIT) {
+                    memoryConsumption.set(size);
+                    try {
+                        flush();
+                    } catch (IOException e) {
+                        memoryConsumption.set(prev);
+                        throw new UncheckedIOException(e);
+                    }
                 }
             }
-            memoryConsumption.getAndAdd(size);
-            storage.put(record.getKey(), record);
         }
+        storage.put(record.getKey(), record);
     }
 
     public static int sizeOf(Record record) {
@@ -130,12 +156,9 @@ public class LsmDAO implements DAO {
     }
 
     public void flush() throws IOException {
-//        String SStablePrefix = "SStable_";
-//        String ext = ".dat";
         SSTable ssTable = writeSSTable(ssTables.size());
         ssTables.add(ssTable);
         storage = new ConcurrentSkipListMap<>();
-        memoryConsumption.set(0);
     }
 
     private SSTable writeSSTable(int count) throws IOException {
@@ -213,6 +236,7 @@ public class LsmDAO implements DAO {
                     return record2;
                 } else {
                     it2.next();
+
                     return record2;
                 }
             }
@@ -234,7 +258,8 @@ public class LsmDAO implements DAO {
                 if (!hasNext()) {
                     throw new NoSuchElementException();
                 }
-                return current = iterator.next();
+                current = iterator.next();
+                return current;
             }
             return current;
         }
