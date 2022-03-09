@@ -2,11 +2,17 @@ package ru.mail.polis.lsm.vladislav_fetisov;
 
 import javax.annotation.Nonnull;
 import java.nio.ByteBuffer;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class Utils {
-    public static int leftBinarySearch(int l, int r, @Nonnull ByteBuffer key, ByteBuffer records, ByteBuffer offsets) {
+
+    private Utils() {
+
+    }
+
+    public static int leftBinarySearch(int l, int r, @Nonnull ByteBuffer key, BigByteBuffer records, ByteBuffer offsets) {
         while (l != r) {
-            int mid = (l + r) / 2;
+            int mid = l + r >>> 1;
             int res = compareKeys(mid, key, records, offsets);
             if (res == 0) {
                 return mid;
@@ -17,13 +23,13 @@ public class Utils {
                 l = mid + 1;
             }
         }
-        if (l == offsets.limit() / Integer.BYTES) {
+        if (l == offsets.limit() / Long.BYTES) {
             return -1;
         }
         return l;
     }
 
-    public static int rightBinarySearch(int l, int r, @Nonnull ByteBuffer key, ByteBuffer records, ByteBuffer offsets) {
+    public static int rightBinarySearch(int l, int r, @Nonnull ByteBuffer key, BigByteBuffer records, ByteBuffer offsets) {
         if (l == r) {
             return l;
         }
@@ -48,23 +54,34 @@ public class Utils {
         return l + 1;
     }
 
-    private static int compareKeys(int mid, ByteBuffer key, ByteBuffer records, ByteBuffer offsets) {
+    private static int compareKeys(int mid, ByteBuffer key, BigByteBuffer records, ByteBuffer offsets) {
         ByteBuffer buffer = readKey(mid, records, offsets);
         return buffer.compareTo(key);
     }
 
 
-    private static ByteBuffer readKey(int index, ByteBuffer records, ByteBuffer offsets) {
-        int offset = getInt(offsets, index * Integer.BYTES);
+    private static ByteBuffer readKey(int index, BigByteBuffer records, ByteBuffer offsets) {
+        long offset = getLong(offsets, index * Long.BYTES);
         int length = getInt(records, offset);
-        ByteBuffer key = records.slice().limit(length);
-        return key.asReadOnlyBuffer();
+        return records.getByLength(length); //removed duplicate
     }
 
-    public static int getInt(ByteBuffer buffer, int offset) {
+    public static int getInt(BigByteBuffer buffer, long offset) {
         buffer.position(offset);
         return buffer.getInt();
     }
 
+    public static long getLong(ByteBuffer buffer, int offset) {
+        buffer.position(offset);
+        return buffer.getLong();
+    }
 
+    public static void checkMemory(AtomicInteger memoryConsumption) {
+        long usedMemory = Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory();
+        System.out.println("our memory " + memoryConsumption.get() / 1024L);
+        System.out.println("memory use: " + usedMemory / 1024L);
+        long free = Runtime.getRuntime().maxMemory() - usedMemory;
+        System.out.println("free: " + free / 1024L);
+        System.out.println("all " + (usedMemory + free) / 1024L);
+    }
 }

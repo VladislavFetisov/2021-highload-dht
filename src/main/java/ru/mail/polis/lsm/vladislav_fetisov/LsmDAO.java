@@ -12,28 +12,28 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.ConcurrentSkipListMap;
-import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class LsmDAO implements DAO {
     private final AtomicInteger memoryConsumption = new AtomicInteger();
-    private final List<SSTable> ssTables = new CopyOnWriteArrayList<>();
+    private final List<SSTable> ssTables = Collections.synchronizedList(new LinkedList<>());
+    private final AtomicInteger ssTableNum = new AtomicInteger();
     private NavigableMap<ByteBuffer, Record> storage = new ConcurrentSkipListMap<>();
     private final DAOConfig config;
+    private final ExecutorService service = Executors.newFixedThreadPool(2);
 
     public LsmDAO(DAOConfig config) {
         this.config = config;
-        try {
-            ssTables.addAll(SSTable.getAllSSTables(config.getDir()));
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
+        ssTables.addAll(SSTable.getAllSSTables(config.getDir()));
+        ssTableNum.set(ssTables.size());
     }
 
     @Override
     public Iterator<Record> range(@Nullable ByteBuffer fromKey, @Nullable ByteBuffer toKey) {
         Iterator<Record> memRange = map(fromKey, toKey, storage);
-        Iterator<Record> SSTablesRange = SSTablesRange(fromKey, toKey);
+        Iterator<Record> SSTablesRange = SSTablesRange(fromKey, toKey, ssTables);
         PeekingIterator<Record> result = mergeTwo(new PeekingIterator<>(SSTablesRange), new PeekingIterator<>(memRange));
         return filteredResult(result);
     }
@@ -69,9 +69,13 @@ public class LsmDAO implements DAO {
         };
     }
 
-    private Iterator<Record> SSTablesRange(@Nullable ByteBuffer fromKey, @Nullable ByteBuffer toKey) {
+    private Iterator<Record> SSTablesRange(@Nullable ByteBuffer fromKey, @Nullable ByteBuffer toKey, List<SSTable> ssTables) {
         List<Iterator<Record>> ranges = new ArrayList<>();
         for (SSTable table : ssTables) {
+            if (table == SSTable.DUMMY) {
+                System.out.println("SAXAAAAA");
+                continue;
+            }
             ranges.add(table.range(fromKey, toKey));
         }
         return merge(ranges);
@@ -85,6 +89,14 @@ public class LsmDAO implements DAO {
                 int prev = memoryConsumption.get();
                 if (prev > DAOConfig.DEFAULT_MEMORY_LIMIT) {
                     memoryConsumption.set(size);
+//                    service.execute(() -> {
+//                        try {
+//                            flush();
+//                        } catch (IOException e) {
+//                            memoryConsumption.set(prev);
+//                            throw new UncheckedIOException(e);
+//                        }
+//                    });
                     try {
                         flush();
                     } catch (IOException e) {
@@ -101,51 +113,45 @@ public class LsmDAO implements DAO {
         return 2 * Integer.BYTES + record.getKeySize() + record.getValueSize();
     }
 
+
     @Override
-    public void closeAndCompact() {
-        synchronized (this) {
-            Iterator<Record> iterator = SSTablesRange(null, null);
-            Path zeroTableName = config.getDir().resolve(String.valueOf(0));
-            Path lastTableName = config.getDir().resolve(String.valueOf(ssTables.size()));
-            try {
-                SSTable bigSSTable = SSTable.write(iterator, lastTableName);
-                if (!ssTables.isEmpty()) {
-                    ssTables.get(0).close();
+    public void compact() {
+        List<SSTable> tablesForCompact;
+        synchronized (ssTables) {
+            ssTables.add(SSTable.DUMMY);
+            tablesForCompact = new ArrayList<>(ssTables);
+        }
+        int i = tablesForCompact.size() - 1;
+        Path tableName = config.getDir().resolve(String.valueOf(i));
+        Iterator<Record> iterator = SSTablesRange(null, null, tablesForCompact);
+        try {
+            SSTable compacted = SSTable.write(iterator, tableName);
+            synchronized (ssTables) {
+                if (i < ssTables.size() && ssTables.get(i) == SSTable.DUMMY) {
+                    ssTables.set(i, compacted);
+                    for (int j = 0; j < i; j++) {
+                        ssTables.remove(0);
+                    }
                 }
-                renameSSTable(bigSSTable, zeroTableName);
-                for (int i = ssTables.size() - 1; i >= 1; i--) {
-                    SSTable table = ssTables.get(i);
-                    deleteSSTable(table);
-                }
-                ssTables.clear();
-                ssTables.add(bigSSTable);
-            } catch (IOException e) {
-                e.printStackTrace();
             }
+            deleteSSTables(tablesForCompact, i);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
         }
     }
 
+    private void deleteSSTables(List<SSTable> ssTables, int i) throws IOException {
+        for (int j = 0; j < i; j++) {
+            deleteSSTable(ssTables.get(j));
+        }
+    }
 
     private void deleteSSTable(SSTable table) throws IOException {
         table.close();
-        Files.deleteIfExists(table.getOffsetsName());
         Files.deleteIfExists(table.getFileName());
+        Files.deleteIfExists(table.getOffsetsName());
     }
 
-    private static void renameSSTable(SSTable table, Path tableDest) throws IOException {
-        SSTable.rename(table.getOffsetsName(), SSTable.pathWithSuffix(tableDest, SSTable.SUFFIX_INDEX)); //there might be problem
-        SSTable.rename(table.getFileName(), tableDest);
-        table.setFileName(tableDest);
-    }
-
-    private void checkMemory() {
-        long usedMemory = Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory();
-        System.out.println("our memory " + memoryConsumption.get() / 1024L);
-        System.out.println("memory use: " + usedMemory / 1024L);
-        long free = Runtime.getRuntime().maxMemory() - usedMemory;
-        System.out.println("free: " + free / 1024L);
-        System.out.println("all " + (usedMemory + free) / 1024L);
-    }
 
     @Override
     public void close() throws IOException {
@@ -271,6 +277,9 @@ public class LsmDAO implements DAO {
 
         @Override
         public T next() {
+            if (!hasNext()) {
+                throw new NoSuchElementException();
+            }
             T res = peek();
             current = null;
             return res;

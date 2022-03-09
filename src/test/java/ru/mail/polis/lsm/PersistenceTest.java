@@ -5,11 +5,13 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.util.Arrays;
 import java.util.Iterator;
 import java.util.Map;
 
@@ -166,10 +168,11 @@ class PersistenceTest {
     void hugeRecordsSearch(@TempDir Path data) throws IOException {
         // Reference value
         int size = 1024 * 1024;
-        byte[] suffix = sizeBasedRandomData(size);
+        //byte[] suffix = sizeBasedRandomData(size);
+        byte[] suffix = zeroBasedRandomData(size);
         int recordsCount = (int) (TestDaoWrapper.MAX_HEAP * 15 / size);
-
-        prepareHugeDao(data, recordsCount, suffix);
+        data = Path.of("/tmp/junit248926796075248475");
+        //prepareHugeDao(data, recordsCount, suffix);
 
         // Check
         try (DAO dao = TestDaoWrapper.create(new DAOConfig(data))) {
@@ -186,6 +189,12 @@ class PersistenceTest {
                 assertFalse(range.hasNext());
             }
         }
+    }
+
+    private byte[] zeroBasedRandomData(int size) {
+        byte[] result = new byte[size];
+        Arrays.fill(result, (byte) '0');
+        return result;
     }
 
     @Test
@@ -207,7 +216,7 @@ class PersistenceTest {
         int beforeCompactSize = getDirSize(data);
 
         try (DAO dao = TestDaoWrapper.create(new DAOConfig(data))) {
-            dao.closeAndCompact();
+            dao.compact();
             assertDaoEquals(dao, map);
         }
 

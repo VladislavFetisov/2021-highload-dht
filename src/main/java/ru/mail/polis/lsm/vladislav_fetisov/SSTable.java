@@ -5,6 +5,7 @@ import ru.mail.polis.lsm.Record;
 import javax.annotation.Nullable;
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
@@ -15,18 +16,22 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
+import java.util.NoSuchElementException;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public class SSTable implements Closeable {
     public static final String SUFFIX_INDEX = "i";
     private static final Method CLEAN;
-    private volatile Path file;
-    private volatile Path offsetsName;
-    private MappedByteBuffer nmap;
+    private final Path file;
+    private final Path offsetsName;
+    private BigByteBuffer nmap;
     private MappedByteBuffer offsetsMap;
+
+    public static final SSTable DUMMY = new SSTable();
 
     static {
         try {
@@ -38,19 +43,24 @@ public class SSTable implements Closeable {
         }
     }
 
-    private SSTable(Path file) {
+    public SSTable(Path file) {
         this.file = file;
         Path offsetsName = pathWithSuffix(file, SUFFIX_INDEX);
         this.offsetsName = offsetsName;
         try (FileChannel tableChannel = FileChannel.open(file, StandardOpenOption.READ);
              FileChannel offsetChannel = FileChannel.open(offsetsName, StandardOpenOption.READ)) {
 
-            nmap = tableChannel.map(FileChannel.MapMode.READ_ONLY, 0, tableChannel.size());
+            nmap = new BigByteBuffer(tableChannel);
             offsetsMap = offsetChannel.map(FileChannel.MapMode.READ_ONLY, 0, offsetChannel.size());
 
         } catch (IOException e) {
-            e.printStackTrace();
+            throw new UncheckedIOException(e);
         }
+    }
+
+    private SSTable() {
+        file = null;
+        offsetsName = null;
     }
 
     public Path getFileName() {
@@ -61,31 +71,34 @@ public class SSTable implements Closeable {
         return offsetsName;
     }
 
-    public synchronized void setFileName(Path file) {
-        this.file = file;
-        this.offsetsName = pathWithSuffix(file, SUFFIX_INDEX);
-    }
 
-    public static List<SSTable> getAllSSTables(Path dir) throws IOException {
-        List<SSTable> result = new ArrayList<>();
-        for (int i = 0; ; i++) {
-            Path SSTable = dir.resolve(String.valueOf(i));
-            if (!Files.exists(SSTable)) {
-                break;
-            }
-            result.add(new SSTable(SSTable));
+    public static List<SSTable> getAllSSTables(Path dir) {
+        try (Stream<Path> stream = Files.list(dir)) {
+            return stream
+                    .filter(path -> {
+                        String s = path.getFileName().toString();
+                        return s.charAt(s.length() - 1) != SUFFIX_INDEX.charAt(0);
+                    })
+                    .sorted((path1, path2) -> {
+                        String s1 = path1.getFileName().toString();
+                        String s2 = path2.getFileName().toString();
+                        return Integer.compare(Integer.parseInt(s1), Integer.parseInt(s2));
+                    })
+                    .map(SSTable::new)
+                    .collect(Collectors.toList());
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
         }
-        return result;
     }
 
     Iterator<Record> range(@Nullable ByteBuffer fromKey, @Nullable ByteBuffer toKey) {
-        ByteBuffer recordsBuffer = nmap.asReadOnlyBuffer();
-        ByteBuffer offsetsBuffer = offsetsMap.asReadOnlyBuffer();
-        int leftPos;
-        int rightPos;
+        BigByteBuffer recordsBuffer = nmap.duplicate();
+        ByteBuffer offsetsBuffer = offsetsMap.duplicate();
+        long leftPos;
+        long rightPos;
         int temp;
 
-        int limit = offsetsBuffer.limit() / Integer.BYTES;
+        int limit = offsetsBuffer.limit() / Long.BYTES;
         if (fromKey == null) {
             leftPos = 0;
         } else {
@@ -93,7 +106,7 @@ public class SSTable implements Closeable {
             if (temp == -1) {
                 return Collections.emptyIterator();
             }
-            leftPos = Utils.getInt(offsetsBuffer, temp * Integer.BYTES);
+            leftPos = Utils.getLong(offsetsBuffer, temp * Long.BYTES);
         }
 
 
@@ -107,7 +120,7 @@ public class SSTable implements Closeable {
             if (temp == limit) {
                 rightPos = recordsBuffer.limit();
             } else {
-                rightPos = Utils.getInt(offsetsBuffer, temp * Integer.BYTES);
+                rightPos = Utils.getLong(offsetsBuffer, temp * Long.BYTES);
             }
         }
 
@@ -121,6 +134,9 @@ public class SSTable implements Closeable {
 
             @Override
             public Record next() {
+                if (!hasNext()) {
+                    throw new NoSuchElementException();
+                }
                 ByteBuffer key = read(recordsBuffer);
                 ByteBuffer value = read(recordsBuffer);
                 if (value == null) {
@@ -132,35 +148,31 @@ public class SSTable implements Closeable {
     }
 
     @Nullable
-    private ByteBuffer read(ByteBuffer from) {
+    private ByteBuffer read(BigByteBuffer from) {
         int length = from.getInt();
         if (length == -1) {
             return null;
         }
-        ByteBuffer limit = from.slice().limit(length);
-        from.position(from.position() + length);
-        return limit;
+        return from.getByLength(length);
     }
 
     static SSTable write(Iterator<Record> records, Path tableName) throws IOException {
         String tmpSuffix = "_tmp";
+
         Path offsetsName = pathWithSuffix(tableName, SUFFIX_INDEX);
         Path tableTmp = pathWithSuffix(tableName, tmpSuffix);
         Path offsetsTmp = pathWithSuffix(offsetsName, tmpSuffix);
-        int offset = 0;
-        ByteBuffer forLength = ByteBuffer.allocate(Integer.BYTES);
+
+        ByteBuffer forLength = ByteBuffer.allocate(Long.BYTES);
         try (FileChannel tableChannel = open(tableTmp);
              FileChannel offsetsChannel = open(offsetsTmp)) {
             while (records.hasNext()) {
                 Record record = records.next();
+                writeLong(tableChannel.position(), offsetsChannel, forLength);
                 writeRecord(forLength, tableChannel, record);
-                writeInt(offset, offsetsChannel, forLength);
-                offset += LsmDAO.sizeOf(record);
             }
             tableChannel.force(false);
             offsetsChannel.force(false);
-        } catch (IOException e) {
-            throw new IOException();
         }
         rename(offsetsTmp, offsetsName);
         rename(tableTmp, tableName);
@@ -192,16 +204,17 @@ public class SSTable implements Closeable {
     private static void writeBuffer(@Nullable ByteBuffer value, WritableByteChannel channel, ByteBuffer forLength) throws IOException {
         forLength.position(0);
         forLength.putInt((value == null) ? -1 : value.remaining());
-        forLength.position(0);
+        forLength.flip();
         channel.write(forLength);
         if (value != null) {
             channel.write(value);
         }
+        forLength.clear();
     }
 
-    private static void writeInt(int value, WritableByteChannel channel, ByteBuffer elementBuffer) throws IOException {
+    private static void writeLong(long value, WritableByteChannel channel, ByteBuffer elementBuffer) throws IOException {
         elementBuffer.position(0);
-        elementBuffer.putInt(value);
+        elementBuffer.putLong(value);
         elementBuffer.position(0);
         channel.write(elementBuffer);
     }
@@ -209,7 +222,9 @@ public class SSTable implements Closeable {
     public void close() throws IOException {
         IOException exception = null;
         try {
-            unmap(nmap);
+            for (ByteBuffer buffer : nmap.getBuffers()) {
+                unmap((MappedByteBuffer) buffer);
+            }
         } catch (IOException e) {
             exception = e;
         }
