@@ -29,45 +29,54 @@ public class BigByteBuffer {
         }
     }
 
-    private BigByteBuffer(ByteBuffer[] buffers, long limit) {
+    private BigByteBuffer(ByteBuffer[] buffers, long position, long limit) {
         this.buffers = buffers;
         this.limit = limit;
+        this.position = position;
     }
 
     public BigByteBuffer duplicate() {
         ByteBuffer[] duplicate = new MappedByteBuffer[buffers.length];
         IntStream.range(0, buffers.length).forEach(i -> duplicate[i] = buffers[i].duplicate());
-        return new BigByteBuffer(duplicate, limit);
+        return new BigByteBuffer(duplicate, position, limit);
     }
-    /**
-     *
-     *
-     *
-     * Можно улучшить через getInt, потому что ситуация перехода будет случаться редко.
-     * */
+
     public ByteBuffer getByLength(int length) {
         ByteBuffer current = buffers[bufNum];
-        ByteBuffer buffer = ByteBuffer.allocate(length);
-
         position += length;
         int diff = current.remaining() - length;
+        if (diff >= 0) {
+            ByteBuffer buffer = current.slice().limit(length);
+            current.position(current.position() + length);
+            return buffer;
+        }
+        return getCrossBuffer(length, current, diff);
+    }
+
+    public int getInt() {
+        ByteBuffer current = buffers[bufNum];
+        int length = Integer.BYTES;
+        position += length;
+        int diff = current.remaining() - length;
+        if (diff >= 0) {
+            return current.getInt();
+        }
+        return getCrossBuffer(length, current, diff).getInt();
+    }
+
+    private ByteBuffer getCrossBuffer(int length, ByteBuffer current, int diff) {
+        ByteBuffer buffer = ByteBuffer.allocate(length);
         int bound = Math.min(current.remaining(), length);
         for (int i = 0; i < bound; i++) {
             buffer.put(current.get());
         }
-        if (diff >= 0) {
-            return buffer.flip();
-        }
         current = buffers[++bufNum];
         current.position(0);
-        for (int i = 0; i < Math.abs(diff); i++) {
+        diff = Math.abs(diff);
+        for (int i = 0; i < diff; i++) {
             buffer.put(current.get());
         }
         return buffer.flip();
-    }
-
-    public int getInt() {
-        return getByLength(Integer.BYTES).getInt();
     }
 
     public void position(long position) {
@@ -84,9 +93,5 @@ public class BigByteBuffer {
 
     public long limit() {
         return limit;
-    }
-
-    public ByteBuffer[] getBuffers() {
-        return buffers;
     }
 }

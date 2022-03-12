@@ -12,7 +12,7 @@ public class Utils {
 
     public static int leftBinarySearch(int l, int r, @Nonnull ByteBuffer key, BigByteBuffer records, ByteBuffer offsets) {
         while (l != r) {
-            int mid = l + r >>> 1;
+            int mid = (l + r) >>> 1;
             int res = compareKeys(mid, key, records, offsets);
             if (res == 0) {
                 return mid;

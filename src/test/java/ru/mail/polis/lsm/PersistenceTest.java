@@ -146,6 +146,7 @@ class PersistenceTest {
     @Test
     void hugeRecords(@TempDir Path data) throws IOException {
         // Reference value
+        System.out.println(data);
         int size = 1024 * 1024;
         byte[] suffix = sizeBasedRandomData(size);
         int recordsCount = (int) (TestDaoWrapper.MAX_HEAP * 15 / size);
@@ -168,12 +169,10 @@ class PersistenceTest {
     void hugeRecordsSearch(@TempDir Path data) throws IOException {
         // Reference value
         int size = 1024 * 1024;
-        //byte[] suffix = sizeBasedRandomData(size);
-        byte[] suffix = zeroBasedRandomData(size);
+        byte[] suffix = sizeBasedRandomData(size);
         int recordsCount = (int) (TestDaoWrapper.MAX_HEAP * 15 / size);
-        data = Path.of("/tmp/junit248926796075248475");
-        //prepareHugeDao(data, recordsCount, suffix);
 
+        prepareHugeDao(data, recordsCount, suffix);
         // Check
         try (DAO dao = TestDaoWrapper.create(new DAOConfig(data))) {
             int searchStep = 4;

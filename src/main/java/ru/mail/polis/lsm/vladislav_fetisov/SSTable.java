@@ -3,11 +3,8 @@ package ru.mail.polis.lsm.vladislav_fetisov;
 import ru.mail.polis.lsm.Record;
 
 import javax.annotation.Nullable;
-import java.io.Closeable;
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
@@ -23,9 +20,8 @@ import java.util.NoSuchElementException;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-public class SSTable implements Closeable {
+public class SSTable {
     public static final String SUFFIX_INDEX = "i";
-    private static final Method CLEAN;
     private final Path file;
     private final Path offsetsName;
     private BigByteBuffer nmap;
@@ -33,15 +29,6 @@ public class SSTable implements Closeable {
 
     public static final SSTable DUMMY = new SSTable();
 
-    static {
-        try {
-            Class<?> aClass = Class.forName("sun.nio.ch.FileChannelImpl");
-            CLEAN = aClass.getDeclaredMethod("unmap", MappedByteBuffer.class);
-            CLEAN.setAccessible(true);
-        } catch (ClassNotFoundException | NoSuchMethodException e) {
-            throw new IllegalStateException();
-        }
-    }
 
     public SSTable(Path file) {
         this.file = file;
@@ -217,36 +204,6 @@ public class SSTable implements Closeable {
         elementBuffer.putLong(value);
         elementBuffer.position(0);
         channel.write(elementBuffer);
-    }
-
-    public void close() throws IOException {
-        IOException exception = null;
-        try {
-            for (ByteBuffer buffer : nmap.getBuffers()) {
-                unmap((MappedByteBuffer) buffer);
-            }
-        } catch (IOException e) {
-            exception = e;
-        }
-        try {
-            unmap(offsetsMap);
-        } catch (IOException e) {
-            if (exception != null) {
-                e.addSuppressed(exception);
-            }
-            throw e;
-        }
-    }
-
-    private void unmap(@Nullable MappedByteBuffer nmap) throws IOException {
-        if (nmap == null) {
-            return;
-        }
-        try {
-            CLEAN.invoke(null, nmap);
-        } catch (InvocationTargetException | IllegalAccessException e) {
-            throw new IOException();
-        }
     }
 }
 

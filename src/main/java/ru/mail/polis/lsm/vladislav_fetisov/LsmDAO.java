@@ -15,6 +15,8 @@ import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public class LsmDAO implements DAO {
     private final AtomicInteger memoryConsumption = new AtomicInteger();
@@ -22,7 +24,8 @@ public class LsmDAO implements DAO {
     private final AtomicInteger ssTableNum = new AtomicInteger();
     private NavigableMap<ByteBuffer, Record> storage = new ConcurrentSkipListMap<>();
     private final DAOConfig config;
-    private final ExecutorService service = Executors.newFixedThreadPool(2);
+    private final ExecutorService service = Executors.newSingleThreadScheduledExecutor();
+    private final ReadWriteLock lock = new ReentrantReadWriteLock();
 
     public LsmDAO(DAOConfig config) {
         this.config = config;
@@ -32,10 +35,15 @@ public class LsmDAO implements DAO {
 
     @Override
     public Iterator<Record> range(@Nullable ByteBuffer fromKey, @Nullable ByteBuffer toKey) {
-        Iterator<Record> memRange = map(fromKey, toKey, storage);
-        Iterator<Record> SSTablesRange = SSTablesRange(fromKey, toKey, ssTables);
-        PeekingIterator<Record> result = mergeTwo(new PeekingIterator<>(SSTablesRange), new PeekingIterator<>(memRange));
-        return filteredResult(result);
+        lock.readLock().lock();
+        try {
+            Iterator<Record> memRange = map(fromKey, toKey, storage);
+            Iterator<Record> SSTablesRange = SSTablesRange(fromKey, toKey, ssTables);
+            PeekingIterator<Record> result = mergeTwo(new PeekingIterator<>(SSTablesRange), new PeekingIterator<>(memRange));
+            return filteredResult(result);
+        } finally {
+            lock.readLock().unlock();
+        }
     }
 
     private Iterator<Record> filteredResult(PeekingIterator<Record> result) {
@@ -69,11 +77,12 @@ public class LsmDAO implements DAO {
         };
     }
 
-    private Iterator<Record> SSTablesRange(@Nullable ByteBuffer fromKey, @Nullable ByteBuffer toKey, List<SSTable> ssTables) {
+    private Iterator<Record> SSTablesRange(@Nullable ByteBuffer fromKey,
+                                           @Nullable ByteBuffer toKey,
+                                           List<SSTable> ssTables) {
         List<Iterator<Record>> ranges = new ArrayList<>();
         for (SSTable table : ssTables) {
             if (table == SSTable.DUMMY) {
-                System.out.println("SAXAAAAA");
                 continue;
             }
             ranges.add(table.range(fromKey, toKey));
@@ -83,30 +92,32 @@ public class LsmDAO implements DAO {
 
     @Override
     public void upsert(Record record) {
+        lock.readLock().lock();
         int size = sizeOf(record);
         if (memoryConsumption.addAndGet(size) > DAOConfig.DEFAULT_MEMORY_LIMIT) {
             synchronized (this) {
                 int prev = memoryConsumption.get();
                 if (prev > DAOConfig.DEFAULT_MEMORY_LIMIT) {
                     memoryConsumption.set(size);
-//                    service.execute(() -> {
-//                        try {
-//                            flush();
-//                        } catch (IOException e) {
-//                            memoryConsumption.set(prev);
-//                            throw new UncheckedIOException(e);
-//                        }
-//                    });
-                    try {
-                        flush();
-                    } catch (IOException e) {
-                        memoryConsumption.set(prev);
-                        throw new UncheckedIOException(e);
-                    }
+                    lock.readLock().unlock();
+                    service.execute(() -> {
+                        lock.writeLock().lock();
+                        try {
+                            flush();
+                        } catch (IOException e) {
+                            memoryConsumption.set(prev);
+                            throw new UncheckedIOException(e);
+                        } finally {
+                            storage.put(record.getKey(), record);
+                            lock.writeLock().unlock();
+                        }
+                    });
+                    return;
                 }
             }
         }
         storage.put(record.getKey(), record);
+        lock.readLock().unlock();
     }
 
     public static int sizeOf(Record record) {
@@ -119,24 +130,27 @@ public class LsmDAO implements DAO {
         List<SSTable> tablesForCompact;
         synchronized (ssTables) {
             ssTables.add(SSTable.DUMMY);
+            ssTableNum.getAndIncrement();
             tablesForCompact = new ArrayList<>(ssTables);
         }
         int i = tablesForCompact.size() - 1;
         Path tableName = config.getDir().resolve(String.valueOf(i));
         Iterator<Record> iterator = SSTablesRange(null, null, tablesForCompact);
+
+        lock.writeLock().lock();
         try {
             SSTable compacted = SSTable.write(iterator, tableName);
-            synchronized (ssTables) {
-                if (i < ssTables.size() && ssTables.get(i) == SSTable.DUMMY) {
-                    ssTables.set(i, compacted);
-                    for (int j = 0; j < i; j++) {
-                        ssTables.remove(0);
-                    }
+            if (i < ssTables.size() && ssTables.get(i) == SSTable.DUMMY) {
+                ssTables.set(i, compacted);
+                for (int j = 0; j < i; j++) {
+                    ssTables.remove(0);
                 }
             }
-            deleteSSTables(tablesForCompact, i);
+            deleteSSTables(tablesForCompact, i);//FIXME
         } catch (IOException e) {
             throw new UncheckedIOException(e);
+        } finally {
+            lock.writeLock().unlock();
         }
     }
 
@@ -147,7 +161,6 @@ public class LsmDAO implements DAO {
     }
 
     private void deleteSSTable(SSTable table) throws IOException {
-        table.close();
         Files.deleteIfExists(table.getFileName());
         Files.deleteIfExists(table.getOffsetsName());
     }
@@ -156,13 +169,10 @@ public class LsmDAO implements DAO {
     @Override
     public void close() throws IOException {
         flush();
-        for (SSTable ssTable : ssTables) {
-            ssTable.close();
-        }
     }
 
     public void flush() throws IOException {
-        SSTable ssTable = writeSSTable(ssTables.size());
+        SSTable ssTable = writeSSTable(ssTableNum.getAndIncrement());
         ssTables.add(ssTable);
         storage = new ConcurrentSkipListMap<>();
     }
@@ -173,14 +183,16 @@ public class LsmDAO implements DAO {
         return SSTable.write(recordIterator, tablePath);
     }
 
-    public static Iterator<Record> map(@Nullable ByteBuffer fromKey, @Nullable ByteBuffer toKey, NavigableMap<ByteBuffer, Record> storage) {
+    public static Iterator<Record> map(@Nullable ByteBuffer fromKey, @Nullable ByteBuffer
+            toKey, NavigableMap<ByteBuffer, Record> storage) {
         if (fromKey == null && toKey == null) {
             return storage.values().iterator();
         }
         return subMap(fromKey, toKey, storage).values().iterator();
     }
 
-    public static SortedMap<ByteBuffer, Record> subMap(@Nullable ByteBuffer fromKey, @Nullable ByteBuffer toKey, NavigableMap<ByteBuffer, Record> storage) {
+    public static SortedMap<ByteBuffer, Record> subMap(@Nullable ByteBuffer fromKey, @Nullable ByteBuffer
+            toKey, NavigableMap<ByteBuffer, Record> storage) {
         if (fromKey == null) {
             return storage.headMap(toKey);
         }

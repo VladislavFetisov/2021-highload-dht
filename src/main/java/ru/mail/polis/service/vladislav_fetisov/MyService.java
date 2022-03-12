@@ -4,16 +4,19 @@ import one.nio.http.*;
 import one.nio.server.AcceptorConfig;
 import ru.mail.polis.lsm.DAO;
 import ru.mail.polis.lsm.Record;
-import ru.mail.polis.lsm.vladislav_fetisov.LsmDAO;
 import ru.mail.polis.service.Service;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class MyService extends HttpServer implements Service {
     private final DAO dao;
+    private final ExecutorService service = Executors.newFixedThreadPool(4);
 
     public MyService(int port, DAO dao) throws IOException {
         super(from(port));
@@ -45,13 +48,6 @@ public class MyService extends HttpServer implements Service {
                 return delete(id);
             case Request.METHOD_PUT:
                 return put(id, request.getBody());
-//            case Request.METHOD_POST:
-//                try {
-//                    ((LsmDAO) dao).flush();
-//                    return new Response(Response.OK, Response.EMPTY);
-//                } catch (IOException e) {
-//                    e.printStackTrace();
-//                }
             default:
                 return new Response(Response.METHOD_NOT_ALLOWED);
         }
@@ -88,6 +84,8 @@ public class MyService extends HttpServer implements Service {
         ac.port = port;
         ac.reusePort = true;
         config.acceptors = new AcceptorConfig[]{ac};
+        config.minWorkers = 4;
+        config.maxWorkers = 4;
         return config;
     }
 
