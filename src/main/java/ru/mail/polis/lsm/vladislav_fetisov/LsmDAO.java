@@ -31,7 +31,7 @@ public class LsmDAO implements DAO {
     private final AtomicBoolean isCompacting = new AtomicBoolean();
     private volatile NavigableMap<ByteBuffer, Record> storage = new ConcurrentSkipListMap<>();
     private volatile NavigableMap<ByteBuffer, Record> readOnlyStorage = Collections.emptyNavigableMap();
-    private final ExecutorService service = Executors.newSingleThreadExecutor();
+    private final ExecutorService service = Executors.newFixedThreadPool(2);
     private final ReadWriteLock lock = new ReentrantReadWriteLock();
     private static final Logger logger = LoggerFactory.getLogger(LsmDAO.class);
     private final Object compactionSynchronized = new Object();
@@ -120,9 +120,9 @@ public class LsmDAO implements DAO {
     public void compact() {
         service.execute(() -> {
             try {
-                logger.info("Starting compact tableCount: {}", ssTables.size());
-                compaction();
-                logger.info("Compact is finished tableCount: {}", ssTables.size());
+                synchronized (compactionSynchronized) {
+                    compaction();
+                }
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
             }
@@ -131,6 +131,7 @@ public class LsmDAO implements DAO {
     }
 
     private void compaction() throws IOException {
+        logger.info("Starting compact tableCount: {}", ssTables.size());
         int num = ssTableNum.getAndIncrement();
         logger.info("compact table num:{}", num);
         duringCompactionTables = new ArrayList<>(); //because isCompacting false
@@ -152,6 +153,7 @@ public class LsmDAO implements DAO {
             lock.writeLock().unlock();
         }
         deleteDiscTables(fixed);
+        logger.info("Compact is finished tableCount: {}", ssTables.size());
     }
 
     private Path tableName(int num) {
