@@ -26,7 +26,6 @@ public class SSTable {
     private final Path offsetsName;
     private BigByteBuffer nmap;
     private MappedByteBuffer offsetsMap;
-
     public static final SSTable DUMMY = new SSTable();
 
 
@@ -50,11 +49,11 @@ public class SSTable {
         offsetsName = null;
     }
 
-    public Path getFileName() {
+    public Path getFile() {
         return file;
     }
 
-    public Path getOffsetsName() {
+    public Path getOffsets() {
         return offsetsName;
     }
 
@@ -62,16 +61,10 @@ public class SSTable {
     public static List<SSTable> getAllSSTables(Path dir) {
         try (Stream<Path> stream = Files.list(dir)) {
             return stream
-                    .filter(path -> {
-                        String s = path.getFileName().toString();
-                        return s.charAt(s.length() - 1) != SUFFIX_INDEX.charAt(0);
-                    })
-                    .sorted((path1, path2) -> {
-                        String s1 = path1.getFileName().toString();
-                        String s2 = path2.getFileName().toString();
-                        return Integer.compare(Integer.parseInt(s1), Integer.parseInt(s2));
-                    })
-                    .map(SSTable::new)
+                    .filter(path -> !path.toString().endsWith(SUFFIX_INDEX))
+                    .mapToInt(path -> Integer.parseInt(path.getFileName().toString()))
+                    .sorted()
+                    .mapToObj(i -> new SSTable(dir.resolve(String.valueOf(i))))
                     .collect(Collectors.toList());
         } catch (IOException e) {
             throw new UncheckedIOException(e);
@@ -170,6 +163,7 @@ public class SSTable {
     public static void rename(Path source, Path target) throws IOException {
         Files.deleteIfExists(target);
         Files.move(source, target, StandardCopyOption.ATOMIC_MOVE);
+        Files.deleteIfExists(source);
     }
 
     public static Path pathWithSuffix(Path tableName, String suffixIndex) {

@@ -1,5 +1,7 @@
 package ru.mail.polis.lsm.vladislav_fetisov;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import ru.mail.polis.lsm.DAO;
 import ru.mail.polis.lsm.DAOConfig;
 import ru.mail.polis.lsm.Record;
@@ -14,171 +16,183 @@ import java.util.*;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public class LsmDAO implements DAO {
-    private final AtomicInteger memoryConsumption = new AtomicInteger();
-    private final List<SSTable> ssTables = Collections.synchronizedList(new LinkedList<>());
-    private final AtomicInteger ssTableNum = new AtomicInteger();
-    private NavigableMap<ByteBuffer, Record> storage = new ConcurrentSkipListMap<>();
     private final DAOConfig config;
-    private final ExecutorService service = Executors.newSingleThreadScheduledExecutor();
+    private final AtomicInteger memoryConsumption = new AtomicInteger();
+    private volatile List<SSTable> ssTables = new ArrayList<>();
+    private List<SSTable> duringCompactionTables = new ArrayList<>();
+    private final AtomicInteger ssTableNum = new AtomicInteger();
+    private final AtomicBoolean isCompacting = new AtomicBoolean();
+    private volatile NavigableMap<ByteBuffer, Record> storage = new ConcurrentSkipListMap<>();
+    private volatile NavigableMap<ByteBuffer, Record> readOnlyStorage = Collections.emptyNavigableMap();
+    private final ExecutorService service = Executors.newSingleThreadExecutor();
     private final ReadWriteLock lock = new ReentrantReadWriteLock();
+    private static final Logger logger = LoggerFactory.getLogger(LsmDAO.class);
+    private final Object compactionSynchronized = new Object();
 
     public LsmDAO(DAOConfig config) {
         this.config = config;
         ssTables.addAll(SSTable.getAllSSTables(config.getDir()));
-        ssTableNum.set(ssTables.size());
-    }
-
-    @Override
-    public Iterator<Record> range(@Nullable ByteBuffer fromKey, @Nullable ByteBuffer toKey) {
-        lock.readLock().lock();
-        try {
-            Iterator<Record> memRange = map(fromKey, toKey, storage);
-            Iterator<Record> SSTablesRange = SSTablesRange(fromKey, toKey, ssTables);
-            PeekingIterator<Record> result = mergeTwo(new PeekingIterator<>(SSTablesRange), new PeekingIterator<>(memRange));
-            return filteredResult(result);
-        } finally {
-            lock.readLock().unlock();
+        if (ssTables.isEmpty()) {
+            ssTableNum.set(0);
+            return;
         }
+        int maxNum = Integer.parseInt(ssTables.get(ssTables.size() - 1).getFile().getFileName().toString());
+        ssTableNum.set(maxNum + 1);
     }
 
-    private Iterator<Record> filteredResult(PeekingIterator<Record> result) {
-        return new Iterator<>() {
-
-            @Override
-            public boolean hasNext() {
-                if (!result.hasNext()) {
-                    return false;
-                }
-                Record peek = result.peek();
-                while (peek.isTombstone()) {
-                    if (!result.hasNext()) {
-                        return false;
-                    }
-                    result.next();
-                    if (!result.hasNext()) {
-                        return false;
-                    }
-                }
-                return true;
-            }
-
-            @Override
-            public Record next() {
-                if (!hasNext()) {
-                    throw new NoSuchElementException();
-                }
-                return result.next();
-            }
-        };
-    }
 
     private Iterator<Record> SSTablesRange(@Nullable ByteBuffer fromKey,
                                            @Nullable ByteBuffer toKey,
                                            List<SSTable> ssTables) {
         List<Iterator<Record>> ranges = new ArrayList<>();
         for (SSTable table : ssTables) {
-            if (table == SSTable.DUMMY) {
-                continue;
-            }
             ranges.add(table.range(fromKey, toKey));
         }
-        return merge(ranges);
+        return Iterators.merge(ranges);
+    }
+
+    @Override
+    public Iterator<Record> range(@Nullable ByteBuffer fromKey, @Nullable ByteBuffer toKey) {
+        Iterator<Record> memRange = map(fromKey, toKey, storage);
+        Iterator<Record> readOnly = map(fromKey, toKey, readOnlyStorage);
+        Iterator<Record> SSTablesRange = SSTablesRange(fromKey, toKey, ssTables);
+        Iterators.PeekingIterator<Record> result = Iterators.mergeList(List.of(SSTablesRange, readOnly, memRange));
+        return Iterators.filteredResult(result);
     }
 
     @Override
     public void upsert(Record record) {
-        lock.readLock().lock();
         int size = sizeOf(record);
-        if (memoryConsumption.addAndGet(size) > DAOConfig.DEFAULT_MEMORY_LIMIT) {
+        if (memoryConsumption.addAndGet(size) > config.memoryLimit) {
             synchronized (this) {
                 int prev = memoryConsumption.get();
-                if (prev > DAOConfig.DEFAULT_MEMORY_LIMIT) {
+                if (prev > config.memoryLimit) {
+                    this.readOnlyStorage = this.storage;
+                    this.storage = new ConcurrentSkipListMap<>();
+                    logger.info("Starting flush memory: {}", memoryConsumption.get());
                     memoryConsumption.set(size);
-                    lock.readLock().unlock();
-                    service.execute(() -> {
-                        lock.writeLock().lock();
-                        try {
-                            flush();
-                        } catch (IOException e) {
-                            memoryConsumption.set(prev);
-                            throw new UncheckedIOException(e);
-                        } finally {
-                            storage.put(record.getKey(), record);
-                            lock.writeLock().unlock();
-                        }
-                    });
-                    return;
+                    try {
+                        flush(readOnlyStorage);
+                        this.readOnlyStorage = Collections.emptyNavigableMap();
+                    } catch (IOException e) {
+                        memoryConsumption.set(prev);
+                        throw new UncheckedIOException(e);
+                    }
                 }
             }
         }
         storage.put(record.getKey(), record);
-        lock.readLock().unlock();
     }
 
-    public static int sizeOf(Record record) {
-        return 2 * Integer.BYTES + record.getKeySize() + record.getValueSize();
-    }
-
-
-    @Override
-    public void compact() {
-        List<SSTable> tablesForCompact;
-        synchronized (ssTables) {
-            ssTables.add(SSTable.DUMMY);
-            ssTableNum.getAndIncrement();
-            tablesForCompact = new ArrayList<>(ssTables);
-        }
-        int i = tablesForCompact.size() - 1;
-        Path tableName = config.getDir().resolve(String.valueOf(i));
-        Iterator<Record> iterator = SSTablesRange(null, null, tablesForCompact);
+    public void flush(NavigableMap<ByteBuffer, Record> storage) throws IOException {
+        logger.info("start flush");
+        int num = ssTableNum.getAndIncrement();
+        SSTable ssTable = writeSSTable(num, storage);
 
         lock.writeLock().lock();
         try {
-            SSTable compacted = SSTable.write(iterator, tableName);
-            if (i < ssTables.size() && ssTables.get(i) == SSTable.DUMMY) {
-                ssTables.set(i, compacted);
-                for (int j = 0; j < i; j++) {
-                    ssTables.remove(0);
-                }
+            atomicAdd(ssTable);
+            if (isCompacting.get()) {
+                duringCompactionTables.add(ssTable);
             }
-            deleteSSTables(tablesForCompact, i);//FIXME
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
         } finally {
             lock.writeLock().unlock();
         }
+
+        if (ssTables.size() >= config.tableCount) {
+            synchronized (compactionSynchronized) {
+                if (ssTables.size() >= config.tableCount) {
+                    compact();
+                }
+            }
+        }
+        logger.info("flush is finished");
     }
 
-    private void deleteSSTables(List<SSTable> ssTables, int i) throws IOException {
-        for (int j = 0; j < i; j++) {
-            deleteSSTable(ssTables.get(j));
+    @Override
+    public void compact() {
+        service.execute(() -> {
+            try {
+                logger.info("Starting compact tableCount: {}", ssTables.size());
+                compaction();
+                logger.info("Compact is finished tableCount: {}", ssTables.size());
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+
+        });
+    }
+
+    private void compaction() throws IOException {
+        int num = ssTableNum.getAndIncrement();
+        logger.info("compact table num:{}", num);
+        duringCompactionTables = new ArrayList<>(); //because isCompacting false
+        duringCompactionTables.add(SSTable.DUMMY);
+
+        List<SSTable> fixed = this.ssTables;
+
+        isCompacting.set(true);
+        Iterator<Record> iterator = SSTablesRange(null, null, fixed);
+        Path tableName = tableName(num);
+        SSTable compacted = SSTable.write(iterator, tableName);
+
+        lock.writeLock().lock();
+        try {
+            duringCompactionTables.set(0, compacted);
+            this.ssTables = duringCompactionTables;
+        } finally {
+            isCompacting.set(false);
+            lock.writeLock().unlock();
+        }
+        deleteDiscTables(fixed);
+    }
+
+    private Path tableName(int num) {
+        return config.getDir().resolve(String.valueOf(num));
+    }
+
+    private void deleteDiscTables(List<SSTable> fixed) throws IOException {
+        for (SSTable table : fixed) {
+            Files.deleteIfExists(table.getFile());
+            Files.deleteIfExists(table.getOffsets());
         }
     }
 
-    private void deleteSSTable(SSTable table) throws IOException {
-        Files.deleteIfExists(table.getFileName());
-        Files.deleteIfExists(table.getOffsetsName());
+    private void atomicAdd(SSTable ssTable) {
+        ArrayList<SSTable> newTables = new ArrayList<>(ssTables.size() + 1);
+        newTables.addAll(ssTables);
+        newTables.add(ssTable);
+        this.ssTables = newTables;
     }
-
 
     @Override
     public void close() throws IOException {
-        flush();
+        logger.info("Closing table");
+        synchronized (this) {
+            flush(storage);
+        }
+        logger.info("Table is closed");
+        service.shutdown();
+        try {
+            if (!service.awaitTermination(10L, TimeUnit.MINUTES)) {
+                throw new IllegalStateException("Cant await termination");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Cant await termination");
+        }
+
     }
 
-    public void flush() throws IOException {
-        SSTable ssTable = writeSSTable(ssTableNum.getAndIncrement());
-        ssTables.add(ssTable);
-        storage = new ConcurrentSkipListMap<>();
-    }
-
-    private SSTable writeSSTable(int count) throws IOException {
-        Path tablePath = config.getDir().resolve(String.valueOf(count));
+    private SSTable writeSSTable(int count, NavigableMap<ByteBuffer, Record> storage) throws IOException {
+        Path tablePath = tableName(count);
         Iterator<Record> recordIterator = storage.values().iterator();
         return SSTable.write(recordIterator, tablePath);
     }
@@ -202,100 +216,8 @@ public class LsmDAO implements DAO {
         return storage.subMap(fromKey, toKey);
     }
 
-    private static Iterator<Record> merge(List<Iterator<Record>> iterators) {
-        switch (iterators.size()) {
-            case 0:
-                return Collections.emptyIterator();
-            case 1:
-                return iterators.get(0);
-            case 2:
-                return mergeTwo(new PeekingIterator<>(iterators.get(0)), new PeekingIterator<>(iterators.get(1)));
-            default:
-                return mergeList(iterators);
-        }
-    }
 
-    private static Iterator<Record> mergeList(List<Iterator<Record>> iterators) {
-        return iterators
-                .stream()
-                .map(PeekingIterator::new)
-                .reduce(LsmDAO::mergeTwo)
-                .orElse(new PeekingIterator<>(Collections.emptyIterator()));
-    }
-
-    private static PeekingIterator<Record> mergeTwo(PeekingIterator<Record> it1, PeekingIterator<Record> it2) {
-        return new PeekingIterator<>(new Iterator<>() {
-
-            @Override
-            public boolean hasNext() {
-                return it1.hasNext() || it2.hasNext();
-            }
-
-            @Override
-            public Record next() {
-                if (!hasNext()) {
-                    throw new NoSuchElementException();
-                }
-                if (!it1.hasNext()) {
-                    return it2.next();
-                }
-                if (!it2.hasNext()) {
-                    return it1.next();
-                }
-                Record record1 = it1.peek();
-                Record record2 = it2.peek();
-                int compare = record1.getKey().compareTo(record2.getKey());
-                if (compare < 0) {
-                    it1.next();
-                    return record1;
-                } else if (compare == 0) {
-                    it1.next();
-                    it2.next();
-                    return record2;
-                } else {
-                    it2.next();
-
-                    return record2;
-                }
-            }
-        });
-    }
-
-
-    private static class PeekingIterator<T> implements Iterator<T> {
-        private final Iterator<T> iterator;
-        private T current = null;
-
-        public PeekingIterator(Iterator<T> iterator) {
-            this.iterator = iterator;
-        }
-
-
-        public T peek() {
-            if (current == null) {
-                if (!hasNext()) {
-                    throw new NoSuchElementException();
-                }
-                current = iterator.next();
-                return current;
-            }
-            return current;
-        }
-
-        @Override
-        public boolean hasNext() {
-            return iterator.hasNext() || current != null;
-        }
-
-        @Override
-        public T next() {
-            if (!hasNext()) {
-                throw new NoSuchElementException();
-            }
-            T res = peek();
-            current = null;
-            return res;
-        }
-
+    public static int sizeOf(Record record) {
+        return 2 * Integer.BYTES + record.getKeySize() + record.getValueSize();
     }
 }

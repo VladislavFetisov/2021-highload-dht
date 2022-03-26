@@ -20,17 +20,19 @@ import java.nio.file.Path;
 
 public class DAOConfig {
     public static final int DEFAULT_MEMORY_LIMIT = 32 * 1024 * 1024;
-
+    public static final int MAX_SSTABLE_COUNT = 8;
     public final Path dir;
     public final int memoryLimit;
+    public final int tableCount;
 
     public DAOConfig(Path dir) {
-        this(dir, DEFAULT_MEMORY_LIMIT);
+        this(dir, DEFAULT_MEMORY_LIMIT, MAX_SSTABLE_COUNT);
     }
 
-    public DAOConfig(Path dir, int memoryLimit) {
+    public DAOConfig(Path dir, int memoryLimit, int tableCount) {
         this.dir = dir;
         this.memoryLimit = memoryLimit;
+        this.tableCount = tableCount;
     }
 
     public Path getDir() {
