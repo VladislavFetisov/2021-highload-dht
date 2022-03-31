@@ -13,18 +13,16 @@ import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
-import java.util.concurrent.ConcurrentSkipListMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.locks.ReadWriteLock;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public class LsmDAO implements DAO {
+    private static final int EXCLUSIVE_PERMIT = 1;
+
     private final DAOConfig config;
     private final AtomicInteger memoryConsumption = new AtomicInteger();
+    private final AtomicInteger tablesCount = new AtomicInteger();
     private volatile List<SSTable> ssTables = new ArrayList<>();
     private List<SSTable> duringCompactionTables = new ArrayList<>();
     private final AtomicInteger ssTableNum = new AtomicInteger();
@@ -32,9 +30,10 @@ public class LsmDAO implements DAO {
     private volatile NavigableMap<ByteBuffer, Record> storage = new ConcurrentSkipListMap<>();
     private volatile NavigableMap<ByteBuffer, Record> readOnlyStorage = Collections.emptyNavigableMap();
     private final ExecutorService service = Executors.newFixedThreadPool(2);
-    private final ReadWriteLock lock = new ReentrantReadWriteLock();
     private static final Logger logger = LoggerFactory.getLogger(LsmDAO.class);
-    private final Object compactionSynchronized = new Object();
+
+    private final Semaphore compactSemaphore = new Semaphore(EXCLUSIVE_PERMIT);
+    private final Semaphore flushSemaphore = new Semaphore(EXCLUSIVE_PERMIT);
 
     public LsmDAO(DAOConfig config) {
         this.config = config;
@@ -48,7 +47,7 @@ public class LsmDAO implements DAO {
     }
 
 
-    private Iterator<Record> SSTablesRange(@Nullable ByteBuffer fromKey,
+    private Iterator<Record> ssTablesRange(@Nullable ByteBuffer fromKey,
                                            @Nullable ByteBuffer toKey,
                                            List<SSTable> ssTables) {
         List<Iterator<Record>> ranges = new ArrayList<>();
@@ -62,8 +61,8 @@ public class LsmDAO implements DAO {
     public Iterator<Record> range(@Nullable ByteBuffer fromKey, @Nullable ByteBuffer toKey) {
         Iterator<Record> memRange = map(fromKey, toKey, storage);
         Iterator<Record> readOnly = map(fromKey, toKey, readOnlyStorage);
-        Iterator<Record> SSTablesRange = SSTablesRange(fromKey, toKey, ssTables);
-        Iterators.PeekingIterator<Record> result = Iterators.mergeList(List.of(SSTablesRange, readOnly, memRange));
+        Iterator<Record> ssTablesRange = ssTablesRange(fromKey, toKey, ssTables);
+        Iterators.PeekingIterator<Record> result = Iterators.mergeList(List.of(ssTablesRange, readOnly, memRange));
         return Iterators.filteredResult(result);
     }
 
@@ -71,62 +70,74 @@ public class LsmDAO implements DAO {
     public void upsert(Record record) {
         int size = sizeOf(record);
         if (memoryConsumption.addAndGet(size) > config.memoryLimit) {
-            synchronized (this) {
-                int prev = memoryConsumption.get();
-                if (prev > config.memoryLimit) {
-                    this.readOnlyStorage = this.storage;
-                    this.storage = new ConcurrentSkipListMap<>();
-                    logger.info("Starting flush memory: {}", memoryConsumption.get());
-                    memoryConsumption.set(size);
+            try {
+                flushSemaphore.acquire();
+            } catch (InterruptedException e) {
+                logger.error("flushSemaphore was interrupted");
+                Thread.currentThread().interrupt();
+            }
+            int prev = memoryConsumption.get();
+            if (prev > config.memoryLimit) {
+                this.readOnlyStorage = this.storage;
+                this.storage = new ConcurrentSkipListMap<>();
+                logger.info("Starting flush memory: {} kb", memoryConsumption.get() / 1024L);
+                memoryConsumption.set(size);
+                service.execute(() -> {
                     try {
-                        flush(readOnlyStorage);
+                        flush(readOnlyStorage, true);
                         this.readOnlyStorage = Collections.emptyNavigableMap();
                     } catch (IOException e) {
                         memoryConsumption.set(prev);
                         throw new UncheckedIOException(e);
+                    } finally {
+                        flushSemaphore.release();
                     }
-                }
+                });
             }
         }
         storage.put(record.getKey(), record);
     }
 
-    public void flush(NavigableMap<ByteBuffer, Record> storage) throws IOException {
+
+    public void flush(NavigableMap<ByteBuffer, Record> storage, boolean needCompact) throws IOException {
         logger.info("start flush");
         int num = ssTableNum.getAndIncrement();
+        logger.info("flush table num:{}", num);
         SSTable ssTable = writeSSTable(num, storage);
 
-        lock.writeLock().lock();
-        try {
-            atomicAdd(ssTable);
+        synchronized (isCompacting) {
+            atomicAdd(ssTable); //atomic need for reading
             if (isCompacting.get()) {
                 duringCompactionTables.add(ssTable);
             }
-        } finally {
-            lock.writeLock().unlock();
-        }
-
-        if (ssTables.size() >= config.tableCount) {
-            synchronized (compactionSynchronized) {
-                if (ssTables.size() >= config.tableCount) {
-                    compact();
-                }
-            }
+            tablesCount.incrementAndGet();
         }
         logger.info("flush is finished");
+
+        if (tablesCount.get() >= config.tableCount && needCompact) {
+            try {
+                compactSemaphore.acquire();
+            } catch (InterruptedException e) {
+                logger.error("compactSemaphore was interrupted");
+                Thread.currentThread().interrupt();
+            }
+            boolean b = tablesCount.get() >= config.tableCount;
+            if (!b) {
+                compactSemaphore.release();
+                return;
+            }
+            compact();
+        }
     }
 
     @Override
     public void compact() {
         service.execute(() -> {
             try {
-                synchronized (compactionSynchronized) {
-                    compaction();
-                }
+                compaction();
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
             }
-
         });
     }
 
@@ -134,27 +145,28 @@ public class LsmDAO implements DAO {
         logger.info("Starting compact tableCount: {}", ssTables.size());
         int num = ssTableNum.getAndIncrement();
         logger.info("compact table num:{}", num);
+
         duringCompactionTables = new ArrayList<>(); //because isCompacting false
         duringCompactionTables.add(SSTable.DUMMY);
-
-        List<SSTable> fixed = this.ssTables;
+        tablesCount.set(1);
 
         isCompacting.set(true);
-        Iterator<Record> iterator = SSTablesRange(null, null, fixed);
+        List<SSTable> fixed = this.ssTables;
+
+        Iterator<Record> iterator = ssTablesRange(null, null, fixed);
         Path tableName = tableName(num);
         SSTable compacted = SSTable.write(iterator, tableName);
 
-        lock.writeLock().lock();
-        try {
+        synchronized (isCompacting) {
             duringCompactionTables.set(0, compacted);
             this.ssTables = duringCompactionTables;
-        } finally {
             isCompacting.set(false);
-            lock.writeLock().unlock();
         }
+        compactSemaphore.release();
         deleteDiscTables(fixed);
         logger.info("Compact is finished tableCount: {}", ssTables.size());
     }
+
 
     private Path tableName(int num) {
         return config.getDir().resolve(String.valueOf(num));
@@ -176,11 +188,6 @@ public class LsmDAO implements DAO {
 
     @Override
     public void close() throws IOException {
-        logger.info("Closing table");
-        synchronized (this) {
-            flush(storage);
-        }
-        logger.info("Table is closed");
         service.shutdown();
         try {
             if (!service.awaitTermination(10L, TimeUnit.MINUTES)) {
@@ -190,7 +197,11 @@ public class LsmDAO implements DAO {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Cant await termination");
         }
-
+        logger.info("Closing table");
+        synchronized (this) {
+            flush(storage, false);
+        }
+        logger.info("Table is closed");
     }
 
     private SSTable writeSSTable(int count, NavigableMap<ByteBuffer, Record> storage) throws IOException {
