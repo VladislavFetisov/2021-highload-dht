@@ -4,6 +4,8 @@ import javax.annotation.Nonnull;
 import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static ru.mail.polis.lsm.vladislav_fetisov.LsmDAO.*;
+
 public class Utils {
 
     private Utils() {
@@ -78,10 +80,10 @@ public class Utils {
 
     public static void checkMemory(AtomicInteger memoryConsumption) {
         long usedMemory = Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory();
-        System.out.println("our memory " + memoryConsumption.get() / 1024L);
-        System.out.println("memory use: " + usedMemory / 1024L);
+        logger.info("our memory {}", memoryConsumption.get() / 1024L);
+        logger.info("memory use: {}", usedMemory / 1024L);
         long free = Runtime.getRuntime().maxMemory() - usedMemory;
-        System.out.println("free: " + free / 1024L);
-        System.out.println("all " + (usedMemory + free) / 1024L);
+        logger.info("free: {}", free / 1024L);
+        logger.info("all {}", (usedMemory + free) / 1024L);
     }
 }

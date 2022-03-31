@@ -28,9 +28,9 @@ public class LsmDAO implements DAO {
     private final AtomicInteger ssTableNum = new AtomicInteger();
     private final AtomicBoolean isCompacting = new AtomicBoolean();
     private volatile NavigableMap<ByteBuffer, Record> storage = new ConcurrentSkipListMap<>();
-    private volatile NavigableMap<ByteBuffer, Record> readOnlyStorage = Collections.emptyNavigableMap();
+    private volatile NavigableMap<ByteBuffer, Record> readOnlyStorage = getEmptyMap();
     private final ExecutorService service = Executors.newFixedThreadPool(2);
-    private static final Logger logger = LoggerFactory.getLogger(LsmDAO.class);
+    public static final Logger logger = LoggerFactory.getLogger(LsmDAO.class);
 
     private final Semaphore compactSemaphore = new Semaphore(EXCLUSIVE_PERMIT);
     private final Semaphore flushSemaphore = new Semaphore(EXCLUSIVE_PERMIT);
@@ -72,32 +72,61 @@ public class LsmDAO implements DAO {
         if (memoryConsumption.addAndGet(size) > config.memoryLimit) {
             try {
                 flushSemaphore.acquire();
+                int prev = memoryConsumption.get();
+                if (prev > config.memoryLimit) {
+                    performFlush(size, prev);
+                } else {
+                    flushSemaphore.release();
+                }
             } catch (InterruptedException e) {
                 logger.error("flushSemaphore was interrupted");
                 Thread.currentThread().interrupt();
-            }
-            int prev = memoryConsumption.get();
-            if (prev > config.memoryLimit) {
-                this.readOnlyStorage = this.storage;
-                this.storage = new ConcurrentSkipListMap<>();
-                logger.info("Starting flush memory: {} kb", memoryConsumption.get() / 1024L);
-                memoryConsumption.set(size);
-                service.execute(() -> {
-                    try {
-                        flush(readOnlyStorage, true);
-                        this.readOnlyStorage = Collections.emptyNavigableMap();
-                    } catch (IOException e) {
-                        memoryConsumption.set(prev);
-                        throw new UncheckedIOException(e);
-                    } finally {
-                        flushSemaphore.release();
-                    }
-                });
             }
         }
         storage.put(record.getKey(), record);
     }
 
+    private void performFlush(int size, int prev) {
+        beforeFlush();
+        logger.info("Starting flush memory: {} kb", memoryConsumption.get() / 1024L);
+        memoryConsumption.set(size);
+        service.execute(() -> {
+            try {
+                flush(readOnlyStorage, true);
+                afterFlush();
+            } catch (IOException e) {
+                memoryConsumption.set(prev);
+                throw new UncheckedIOException(e);
+            } finally {
+                flushSemaphore.release();
+            }
+        });
+    }
+
+    private void beforeFlush() {
+        this.readOnlyStorage = this.storage;
+        this.storage = new ConcurrentSkipListMap<>();
+    }
+
+    private void afterFlush() {
+        this.readOnlyStorage = getEmptyMap();
+    }
+
+    private NavigableMap<ByteBuffer, Record> getEmptyMap() {
+        return Collections.emptyNavigableMap();
+    }
+
+
+    @Override
+    public void compact() {
+        service.execute(() -> {
+            try {
+                compaction();
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        });
+    }
 
     public void flush(NavigableMap<ByteBuffer, Record> storage, boolean needCompact) throws IOException {
         logger.info("start flush");
@@ -117,28 +146,17 @@ public class LsmDAO implements DAO {
         if (tablesCount.get() >= config.tableCount && needCompact) {
             try {
                 compactSemaphore.acquire();
+                boolean b = tablesCount.get() >= config.tableCount;
+                if (!b) {
+                    compactSemaphore.release();
+                    return;
+                }
+                compact();
             } catch (InterruptedException e) {
                 logger.error("compactSemaphore was interrupted");
                 Thread.currentThread().interrupt();
             }
-            boolean b = tablesCount.get() >= config.tableCount;
-            if (!b) {
-                compactSemaphore.release();
-                return;
-            }
-            compact();
         }
-    }
-
-    @Override
-    public void compact() {
-        service.execute(() -> {
-            try {
-                compaction();
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
-            }
-        });
     }
 
     private void compaction() throws IOException {
