@@ -27,8 +27,8 @@ public class TestDaoWrapper implements DAO {
     }
 
     @Override
-    public void upsert(Record record) {
-        delegate.upsert(record);
+    public boolean upsert(Record record) {
+        return delegate.upsert(record);
     }
 
     @Override

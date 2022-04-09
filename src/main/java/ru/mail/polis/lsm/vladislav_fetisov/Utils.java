@@ -1,10 +1,15 @@
 package ru.mail.polis.lsm.vladislav_fetisov;
 
+import ru.mail.polis.lsm.Record;
+
 import javax.annotation.Nonnull;
+import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.file.Files;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static ru.mail.polis.lsm.vladislav_fetisov.LsmDAO.*;
+import static ru.mail.polis.lsm.vladislav_fetisov.LsmDAO.logger;
 
 public class Utils {
 
@@ -85,5 +90,16 @@ public class Utils {
         long free = Runtime.getRuntime().maxMemory() - usedMemory;
         logger.info("free: {}", free / 1024L);
         logger.info("all {}", (usedMemory + free) / 1024L);
+    }
+
+    public static int sizeOf(Record record) {
+        return 2 * Integer.BYTES + record.getKeySize() + record.getValueSize();
+    }
+
+    public static void deleteDiscTables(List<SSTable> fixed) throws IOException {
+        for (SSTable table : fixed) {
+            Files.deleteIfExists(table.getFile());
+            Files.deleteIfExists(table.getOffsets());
+        }
     }
 }

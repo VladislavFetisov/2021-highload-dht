@@ -53,9 +53,12 @@ public class MyService extends HttpServer implements Service {
     }
 
     private Response put(String id, byte[] body) {
-        dao.upsert(Record.of(ByteBuffer.wrap(id.getBytes(StandardCharsets.UTF_8)
-        ), ByteBuffer.wrap(body)));
-        return new Response(Response.CREATED, Response.EMPTY);
+        boolean upsert = dao.upsert(Record.of(ByteBuffer.wrap(id.getBytes(StandardCharsets.UTF_8)),
+                ByteBuffer.wrap(body)));
+        if (upsert) {
+            return new Response(Response.CREATED, Response.EMPTY);
+        }
+        return new Response(Response.SERVICE_UNAVAILABLE, Response.EMPTY);
     }
 
     private Response delete(String id) {
@@ -67,7 +70,7 @@ public class MyService extends HttpServer implements Service {
         ByteBuffer key = ByteBuffer.wrap(id.getBytes(StandardCharsets.UTF_8));
         Iterator<Record> range = dao.range(key, DAO.nextKey(key));
 
-        return (range.hasNext()) ? new Response(Response.OK, from(range.next().getValue())) :
+        return range.hasNext() ? new Response(Response.OK, from(range.next().getValue())) :
                 new Response(Response.NOT_FOUND, Response.EMPTY);
     }
 

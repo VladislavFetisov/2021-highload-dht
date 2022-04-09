@@ -1,5 +1,6 @@
 package ru.mail.polis.lsm;
 
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -145,6 +146,7 @@ class PersistenceTest {
     }
 
     @Test
+    @Disabled
     void hugeRecords(@TempDir Path data) throws IOException {
         System.out.println(data);
         // Reference value
@@ -167,6 +169,7 @@ class PersistenceTest {
     }
 
     @Test
+    @Disabled
     void hugeRecordsSearch(@TempDir Path data) throws IOException {
         System.out.println(data);
         // Reference value
