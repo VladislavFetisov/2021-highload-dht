@@ -27,6 +27,7 @@ public class LsmDAO implements DAO {
     private final AtomicInteger tablesCount = new AtomicInteger();
     private final AtomicInteger ssTableNum;
     private final AtomicBoolean isCompacting = new AtomicBoolean();
+    private final AtomicBoolean isFlush = new AtomicBoolean();
     private MemTable memTable;
 
     private List<SSTable> duringCompactionTables = new ArrayList<>();
@@ -34,7 +35,6 @@ public class LsmDAO implements DAO {
     private final ExecutorService service = Executors.newFixedThreadPool(THREADS_COUNT);
 
     private final Semaphore compactSemaphore = new Semaphore(EXCLUSIVE_PERMIT);
-    private final Semaphore flushSemaphore = new Semaphore(EXCLUSIVE_PERMIT);
 
     public static final Logger logger = LoggerFactory.getLogger(LsmDAO.class);
 
@@ -75,17 +75,14 @@ public class LsmDAO implements DAO {
     public boolean upsert(Record record) {
         int size = Utils.sizeOf(record);
         if (memoryConsumption.addAndGet(size) > config.memoryLimit) {
-            try {
-                flushSemaphore.acquire();
+            if (isFlush.get()) {
+                return false;
+            }
+            synchronized (memoryConsumption) {//FIXME
                 int prev = memoryConsumption.get();
                 if (prev > config.memoryLimit) {
                     performFlush(size, prev);
-                } else {
-                    flushSemaphore.release();
                 }
-            } catch (InterruptedException e) {
-                logger.error("flushSemaphore was interrupted");
-                Thread.currentThread().interrupt();
             }
         }
         memTable.storage.put(record.getKey(), record);
@@ -98,13 +95,13 @@ public class LsmDAO implements DAO {
         memoryConsumption.set(size);
         service.execute(() -> {
             try {
+                isFlush.set(true);
                 flush(memTable.readOnlyStorage, true);
                 memTable = memTable.afterFlush();
+                isFlush.set(false);
             } catch (IOException e) {
                 memoryConsumption.set(prev);
                 throw new UncheckedIOException(e);
-            } finally {
-                flushSemaphore.release();
             }
         });
     }
