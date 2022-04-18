@@ -28,10 +28,14 @@ import ru.mail.polis.lsm.DAO;
 import ru.mail.polis.lsm.DAOConfig;
 import ru.mail.polis.lsm.DAOFactory;
 
+import javax.xml.transform.Result;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.concurrent.TimeUnit;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.concurrent.*;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -148,7 +152,7 @@ class SingleNodeTest extends TestBase {
         });
     }
 
-//            // Insert
+    //            // Insert
 //            assertEquals(201, upsert(key1, value1).getStatus());
 //            assertEquals(201, upsert(key2, value2).getStatus());
 //            assertEquals(201, upsert(key3, value3).getStatus());
@@ -159,6 +163,30 @@ class SingleNodeTest extends TestBase {
 //            assertArrayEquals(value2, response.getBody());
 //        });
 //    }
+    @Test
+    void manyRequestsInParallel() throws ExecutionException, InterruptedException {
+        int TASK_COUNT = 250;
+        ExecutorService service = Executors.newFixedThreadPool(8);
+        List<Future<Response>> results = new ArrayList<>(TASK_COUNT);
+        for (int i = 0; i < TASK_COUNT; i++) {
+            Future<Response> future = service.submit(() -> {
+                final String key = randomId();
+                final byte[] value = randomValue();
+                try {
+                    return upsert(key, value);
+                } catch (Exception e) {
+                    return null;
+                }
+            });
+            results.add(future);
+        }
+        for (Future<Response> result : results) {
+            System.out.println(result.get().getStatus());
+            System.out.println(new String(result.get().getBody()));
+
+        }
+    }
+
     @Test
     void insertEmpty() {
         assertTimeoutPreemptively(TIMEOUT, () -> {

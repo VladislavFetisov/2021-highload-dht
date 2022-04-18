@@ -20,33 +20,34 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class LsmDAO implements DAO {
-    private static final int EXCLUSIVE_PERMIT = 1;
+    private static final int EXCLUSIVE_PERMISSION = 1;
     public static final int THREADS_COUNT = 2; //1 for compact, 1 for flush
     private final DAOConfig config;
     private final AtomicInteger memoryConsumption = new AtomicInteger();
     private final AtomicInteger tablesCount = new AtomicInteger();
     private final AtomicInteger ssTableNum;
     private final AtomicBoolean isCompacting = new AtomicBoolean();
-    private final AtomicBoolean isFlush = new AtomicBoolean();
-    private MemTable memTable;
+    private final AtomicBoolean isFlush = new AtomicBoolean(false);
+    private volatile Storage storage;
 
     private List<SSTable> duringCompactionTables = new ArrayList<>();
 
     private final ExecutorService service = Executors.newFixedThreadPool(THREADS_COUNT);
 
-    private final Semaphore compactSemaphore = new Semaphore(EXCLUSIVE_PERMIT);
+    private final Semaphore compactSemaphore = new Semaphore(EXCLUSIVE_PERMISSION);
+    private final Semaphore flushSemaphore = new Semaphore(EXCLUSIVE_PERMISSION);
 
     public static final Logger logger = LoggerFactory.getLogger(LsmDAO.class);
 
     public LsmDAO(DAOConfig config) {
         this.config = config;
         List<SSTable> discTables = SSTable.getAllSSTables(config.getDir());
-        memTable = new MemTable(discTables);
+        storage = new Storage(discTables);
         if (discTables.isEmpty()) {
             ssTableNum = new AtomicInteger();
             return;
         }
-        SSTable lastTable = discTables.get(discTables.size() - 1);
+        SSTable lastTable = storage.ssTables.get(discTables.size() - 1);
         int maxNum = Integer.parseInt(lastTable.getFile().getFileName().toString());
         ssTableNum = new AtomicInteger(maxNum + 1);
     }
@@ -64,9 +65,10 @@ public class LsmDAO implements DAO {
 
     @Override
     public Iterator<Record> range(@Nullable ByteBuffer fromKey, @Nullable ByteBuffer toKey) {
-        Iterator<Record> memRange = map(fromKey, toKey, memTable.storage);
-        Iterator<Record> readOnly = map(fromKey, toKey, memTable.readOnlyStorage);
-        Iterator<Record> ssTablesRange = ssTablesRange(fromKey, toKey, memTable.ssTables);
+        Storage localStorage = this.storage;
+        Iterator<Record> memRange = map(fromKey, toKey, localStorage.memTable);
+        Iterator<Record> readOnly = map(fromKey, toKey, localStorage.readOnlyMemTable);
+        Iterator<Record> ssTablesRange = ssTablesRange(fromKey, toKey, localStorage.ssTables);
         Iterators.PeekingIterator<Record> result = Iterators.mergeList(List.of(ssTablesRange, readOnly, memRange));
         return Iterators.filteredResult(result);
     }
@@ -78,26 +80,27 @@ public class LsmDAO implements DAO {
             if (isFlush.get()) {
                 return false;
             }
-            synchronized (memoryConsumption) {//FIXME
+            if (flushSemaphore.tryAcquire(EXCLUSIVE_PERMISSION)) {
                 int prev = memoryConsumption.get();
                 if (prev > config.memoryLimit) {
                     performFlush(size, prev);
                 }
             }
         }
-        memTable.storage.put(record.getKey(), record);
+        storage.memTable.put(record.getKey(), record);
         return true;
     }
 
     private void performFlush(int size, int prev) {
-        memTable = memTable.beforeFlush();
+        storage = storage.beforeFlush();
         logger.info("Starting flush memory: {} kb", memoryConsumption.get() / 1024L);
         memoryConsumption.set(size);
         service.execute(() -> {
             try {
                 isFlush.set(true);
-                flush(memTable.readOnlyStorage, true);
-                memTable = memTable.afterFlush();
+                flush(storage.readOnlyMemTable, true);
+                storage = storage.afterFlush();
+                flushSemaphore.release(EXCLUSIVE_PERMISSION);
                 isFlush.set(false);
             } catch (IOException e) {
                 memoryConsumption.set(prev);
@@ -105,7 +108,6 @@ public class LsmDAO implements DAO {
             }
         });
     }
-
 
     @Override
     public void compact() {
@@ -128,7 +130,7 @@ public class LsmDAO implements DAO {
         SSTable ssTable = writeSSTable(num, storage);
 
         synchronized (isCompacting) {
-            memTable = memTable.add(ssTable); //atomic need for reading
+            this.storage = this.storage.add(ssTable); //atomic need for reading
             if (isCompacting.get()) {
                 duringCompactionTables.add(ssTable); //we don't need there atomic, because only 1 flush per time.
             }
@@ -154,7 +156,7 @@ public class LsmDAO implements DAO {
 
 
     private void compaction() throws IOException {
-        logger.info("Starting compact tableCount: {}", memTable.ssTables.size());
+        logger.info("Starting compact tableCount: {}", storage.ssTables.size());
         int num = ssTableNum.getAndIncrement();
         logger.info("compact table num:{}", num);
 
@@ -163,7 +165,7 @@ public class LsmDAO implements DAO {
         tablesCount.set(1); //same promise as in flush
         isCompacting.set(true);
 
-        List<SSTable> fixed = memTable.ssTables;
+        List<SSTable> fixed = storage.ssTables;
 
         Iterator<Record> iterator = ssTablesRange(null, null, fixed);
         Path tableName = tableName(num);
@@ -171,12 +173,12 @@ public class LsmDAO implements DAO {
 
         synchronized (isCompacting) {
             duringCompactionTables.set(0, compacted);
-            memTable = memTable.afterCompact(duringCompactionTables);
+            storage = storage.afterCompact(duringCompactionTables);
             isCompacting.set(false);
         }
         compactSemaphore.release();
         Utils.deleteDiscTables(fixed);
-        logger.info("Compact is finished tableCount: {}", memTable.ssTables.size());
+        logger.info("Compact is finished tableCount: {}", storage.ssTables.size());
     }
 
 
@@ -193,7 +195,7 @@ public class LsmDAO implements DAO {
         }
         logger.info("Closing table");
         synchronized (this) {
-            flush(memTable.storage, false);
+            flush(storage.memTable, false);
         }
         logger.info("Table is closed");
     }
