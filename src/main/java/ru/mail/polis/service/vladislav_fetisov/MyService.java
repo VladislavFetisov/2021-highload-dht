@@ -2,6 +2,7 @@ package ru.mail.polis.service.vladislav_fetisov;
 
 import one.nio.http.*;
 import one.nio.server.AcceptorConfig;
+import one.nio.util.Utf8;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import ru.mail.polis.lsm.DAO;
@@ -12,13 +13,13 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
-import java.util.concurrent.*;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 public class MyService extends HttpServer implements Service {
-    public static final String STATUS_PATH = "/v0/status";
-    public static final String ENTITY_PATH = "/v0/entity";
     private final DAO dao;
-    private final ThreadPoolExecutor service = newThreadPool();
+    private final ThreadPoolExecutor service = newThreadPool(4);
     public static final Logger logger = LoggerFactory.getLogger(MyService.class);
 
     public MyService(int port, DAO dao) throws IOException {
@@ -26,13 +27,40 @@ public class MyService extends HttpServer implements Service {
         this.dao = dao;
     }
 
+
+    @Path("/v0/status")
+    @RequestMethod(Request.METHOD_GET)
     public Response getStatus() {
-        return Response.ok("");
+        return Response.ok("All good");
     }
 
-    public Response entity(Request request) {
-        String id = request.getParameter("id=");
-        if (id == null || id.isBlank()) {
+    @Path("/v0/entity")
+    public void entity(
+            Request request,
+            HttpSession session,
+            @Param(value = "id", required = true) String id) {
+        Runnable runnable = () -> {
+            try {
+                Response response = getResponse(request, id);
+                session.sendResponse(response);
+            } catch (Exception e) {
+                handleException(session, e);
+            }
+        };
+        service.execute(new Task(runnable, session));
+    }
+
+    private void handleException(HttpSession session, Exception e) {
+        try {
+            session.sendResponse(new Response(Response.INTERNAL_ERROR, Utf8.toBytes("Internal error")));
+            logger.error("Internal error", e);
+        } catch (IOException ex) {
+            logger.error("Failed to send response", ex);
+        }
+    }
+
+    private Response getResponse(Request request, String id) {
+        if (id.isBlank()) {
             return new Response(Response.BAD_REQUEST, Response.EMPTY);
         }
         switch (request.getMethod()) {
@@ -48,32 +76,9 @@ public class MyService extends HttpServer implements Service {
     }
 
     @Override
-    public void handleRequest(Request request, HttpSession session) throws IOException {
-        this.handleDefault(request, session);
-    }
-
-    @Override
     public void handleDefault(Request request, HttpSession session) throws IOException {
-        Runnable runnable = () -> {
-            try {
-                Response response = handleRequest(request);
-                session.sendResponse(response);
-            } catch (IOException e) {
-                session.handleException(e);
-            }
-        };
-        service.execute(new Task(runnable, session));
-    }
-
-    private Response handleRequest(Request request) {
-        switch (request.getPath()) {
-            case STATUS_PATH:
-                return getStatus();
-            case ENTITY_PATH:
-                return entity(request);
-            default:
-                return new Response(Response.BAD_REQUEST, Response.EMPTY);
-        }
+        Response response = new Response(Response.BAD_REQUEST, Response.EMPTY);
+        session.sendResponse(response);
     }
 
     private Response put(String id, byte[] body) {
@@ -114,28 +119,13 @@ public class MyService extends HttpServer implements Service {
         return config;
     }
 
-    private static ThreadPoolExecutor newThreadPool() {
-        return new ThreadPoolExecutor(4,
-                4,
+    private static ThreadPoolExecutor newThreadPool(int cores) {
+        return new ThreadPoolExecutor(cores,
+                cores,
                 0L,
                 TimeUnit.MILLISECONDS,
                 new LinkedBlockingQueue<>(1024),
                 new Task.RejectedHandler());
     }
 
-    public static void main(String[] args) {
-        Runnable runnable = () -> {
-            System.out.println(1);
-        };
-        ThreadPoolExecutor threadPoolExecutor = new ThreadPoolExecutor(4,
-                4,
-                0L,
-                TimeUnit.MILLISECONDS,
-                new LinkedBlockingQueue<>(2),
-                new ThreadPoolExecutor.AbortPolicy());
-        for (int i = 0; i < 10; i++) {
-            threadPoolExecutor.execute(runnable);
-        }
-        threadPoolExecutor.shutdown();
-    }
 }

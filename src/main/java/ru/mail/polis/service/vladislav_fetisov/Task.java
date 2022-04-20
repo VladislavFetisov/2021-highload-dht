@@ -2,16 +2,16 @@ package ru.mail.polis.service.vladislav_fetisov;
 
 import one.nio.http.HttpSession;
 import one.nio.http.Response;
+import one.nio.util.Utf8;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
 
-import static ru.mail.polis.service.vladislav_fetisov.MyService.*;
+import static ru.mail.polis.service.vladislav_fetisov.MyService.logger;
 
 public class Task implements Runnable {
-    private static final byte[] MESSAGE_BODY = "Не помещается в очередь".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] MESSAGE_BODY = Utf8.toBytes("Не помещается в очередь");
     private final Runnable runnable;
     private final HttpSession session;
 
@@ -20,7 +20,7 @@ public class Task implements Runnable {
         this.session = session;
     }
 
-    public void reject() throws IOException {
+    private void reject() throws IOException {
         session.sendResponse(new Response(Response.SERVICE_UNAVAILABLE, MESSAGE_BODY));
     }
 
