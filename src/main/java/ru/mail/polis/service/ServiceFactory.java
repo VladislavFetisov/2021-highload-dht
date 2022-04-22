@@ -17,6 +17,9 @@
 package ru.mail.polis.service;
 
 import ru.mail.polis.lsm.DAO;
+import ru.mail.polis.service.vladislav_fetisov.MyService;
+import ru.mail.polis.service.vladislav_fetisov.topology.Range;
+import ru.mail.polis.service.vladislav_fetisov.topology.Topology;
 
 import java.io.IOException;
 import java.util.Objects;
@@ -60,6 +63,6 @@ public final class ServiceFactory {
             throw new IllegalArgumentException("Empty cluster");
         }
 
-        throw new UnsupportedOperationException("Implement me!");
+        return new MyService(port, dao, new Topology(topology, Range.INT));
     }
 }
