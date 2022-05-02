@@ -17,6 +17,10 @@ public class Topology {
     private final Map<Integer, HttpClient> portsToClients;
     private final List<Integer> shuffledPorts;
 
+    public List<Integer> getShuffledPorts() {
+        return shuffledPorts;
+    }
+
     public Topology(Set<String> endpoints, Range range) {
         vNodes = VNode.getAllVNodes(endpoints.size(), VNODES_COUNT, range);
         portsToClients = portsToClients(endpoints);

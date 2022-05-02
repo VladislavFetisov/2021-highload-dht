@@ -12,10 +12,7 @@ import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.*;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Semaphore;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -32,7 +29,8 @@ public class LsmDAO implements DAO {
 
     private List<SSTable> duringCompactionTables = new ArrayList<>();
 
-    private final ExecutorService service = Executors.newFixedThreadPool(THREADS_COUNT);
+    private final ExecutorService service = getService(THREADS_COUNT);
+
 
     private final Semaphore compactSemaphore = new Semaphore(EXCLUSIVE_PERMISSION);
     private final Semaphore flushSemaphore = new Semaphore(EXCLUSIVE_PERMISSION);
@@ -228,5 +226,15 @@ public class LsmDAO implements DAO {
 
     private Path tableName(int num) {
         return config.getDir().resolve(String.valueOf(num));
+    }
+
+    private static ExecutorService getService(int threadCount) {
+        return new ThreadPoolExecutor(
+                threadCount,
+                threadCount,
+                0L,
+                TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<>(),
+                runnable -> new Thread(runnable, "DAO worker"));
     }
 }

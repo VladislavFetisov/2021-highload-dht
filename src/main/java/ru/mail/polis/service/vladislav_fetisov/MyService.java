@@ -2,6 +2,7 @@ package ru.mail.polis.service.vladislav_fetisov;
 
 import one.nio.http.*;
 import one.nio.pool.PoolException;
+import one.nio.util.Hash;
 import one.nio.util.Utf8;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,13 +21,14 @@ import java.util.concurrent.TimeUnit;
 public class MyService extends HttpServer implements Service {
     private final DAO dao;
     private final Topology topology;
-    private final ThreadPoolExecutor service = newThreadPool(4);
+    private final ThreadPoolExecutor service;
     public static final Logger logger = LoggerFactory.getLogger(MyService.class);
 
     public MyService(int port, DAO dao, Topology topology) throws IOException {
         super(Utils.from(port));
         this.dao = dao;
         this.topology = topology;
+        service = newThreadPool(16, port);
     }
 
     @Path("/v0/status")
@@ -62,36 +64,33 @@ public class MyService extends HttpServer implements Service {
         }
         int hash = getHash(id);
         int port = topology.findPort(hash);
+        if (port != this.port) {
+            return topology.getClientByPort(port).invoke(request);
+        }
         switch (request.getMethod()) {
             case Request.METHOD_GET:
-                return get(id, port, request);
+                return get(id);
             case Request.METHOD_DELETE:
-                return delete(id, port, request);
+                return delete(id);
             case Request.METHOD_PUT:
-                return put(id, port, request);
+                return put(id, request.getBody());
             default:
                 return new Response(Response.METHOD_NOT_ALLOWED);
         }
     }
 
     private int getHash(String id) {
-        return id.hashCode() & 0xfffffff;
+        int hash = Hash.murmur3(id);
+        if (hash == Integer.MIN_VALUE) {
+            return 0;
+        }
+        return Math.abs(hash);
     }
 
     @Override
     public void handleDefault(Request request, HttpSession session) throws IOException {
         Response response = new Response(Response.BAD_REQUEST, Response.EMPTY);
         session.sendResponse(response);
-    }
-
-    private Response put(String id, int port, Request request)
-            throws HttpException, IOException, PoolException, InterruptedException {
-        if (port == this.port) {
-            return put(id, request.getBody());
-        }
-        return topology
-                .getClientByPort(port)
-                .put(request.getURI(), request.getBody());
     }
 
     private Response put(String id, byte[] body) {
@@ -102,32 +101,12 @@ public class MyService extends HttpServer implements Service {
         return new Response(Response.SERVICE_UNAVAILABLE, Response.EMPTY);
     }
 
-    private Response delete(String id, int port, Request request)
-            throws HttpException, IOException, PoolException, InterruptedException {
-        if (port == this.port) {
-            return delete(id);
-        }
-        return topology
-                .getClientByPort(port)
-                .delete(request.getURI());
-    }
-
     private Response delete(String id) {
         boolean success = dao.upsert(Record.tombstone(ByteBuffer.wrap(Utf8.toBytes(id))));
         if (success) {
             return new Response(Response.ACCEPTED, Response.EMPTY);
         }
         return new Response(Response.SERVICE_UNAVAILABLE, Response.EMPTY);
-    }
-
-    private Response get(String id, int port, Request request)
-            throws HttpException, IOException, PoolException, InterruptedException {
-        if (port == this.port) {
-            return get(id);
-        }
-        return topology
-                .getClientByPort(port)
-                .get(request.getURI());
     }
 
     private Response get(String id) {
@@ -138,12 +117,13 @@ public class MyService extends HttpServer implements Service {
                 new Response(Response.NOT_FOUND, Response.EMPTY);
     }
 
-    private static ThreadPoolExecutor newThreadPool(int cores) {
+    private static ThreadPoolExecutor newThreadPool(int cores, int port) {
         return new ThreadPoolExecutor(cores,
                 cores,
                 0L,
                 TimeUnit.MILLISECONDS,
                 new LinkedBlockingQueue<>(1024),
+                runnable -> new Thread(runnable, "Service worker on port:" + port),
                 new Task.RejectedHandler());
     }
 
