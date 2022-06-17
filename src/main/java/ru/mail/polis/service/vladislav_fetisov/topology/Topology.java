@@ -9,22 +9,34 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 public class Topology {
-    private static final Duration TIMEOUT = Duration.ofSeconds(10);
+    private static final Duration TIMEOUT = Duration.ofSeconds(1);
     private static final int VNODES_COUNT = 8;
     private final VNode[] vNodes;
     private final Map<Integer, HttpClient> portsToClients;
-    private final List<Integer> shuffledPorts;
+    private final int[] sortedPorts;
 
-    public List<Integer> getShuffledPorts() {
-        return shuffledPorts;
+    public int[] getSortedPorts() {
+        return sortedPorts;
     }
+
+    private final List<Integer> shuffledPorts;
 
     public Topology(Set<String> endpoints, Range range) {
         vNodes = VNode.getAllVNodes(endpoints.size(), VNODES_COUNT, range);
         portsToClients = portsToClients(endpoints);
         shuffledPorts = VNode.distributeVNodes(vNodes.length, portsToClients.keySet());
+        List<Integer> list = portsToClients
+                .keySet()
+                .stream()
+                .sorted()
+                .collect(Collectors.toList());
+        sortedPorts = new int[list.size()];
+        for (int i = 0; i < list.size(); i++) {
+            sortedPorts[i] = list.get(i);
+        }
     }
 
     private static Map<Integer, HttpClient> portsToClients(Set<String> topology) {
@@ -77,5 +89,9 @@ public class Topology {
             return 1;
         }
         return -1;
+    }
+
+    public int getQuorum() {
+        return (sortedPorts.length / 2) + 1;
     }
 }

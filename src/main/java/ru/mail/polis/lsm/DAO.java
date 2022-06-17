@@ -16,6 +16,8 @@
 
 package ru.mail.polis.lsm;
 
+import one.nio.http.Response;
+
 import javax.annotation.Nullable;
 import java.io.Closeable;
 import java.nio.ByteBuffer;
@@ -49,5 +51,9 @@ public interface DAO extends Closeable {
         result.rewind();
 
         return result;
+    }
+
+    default Record get(ByteBuffer key) {
+        return null;
     }
 }

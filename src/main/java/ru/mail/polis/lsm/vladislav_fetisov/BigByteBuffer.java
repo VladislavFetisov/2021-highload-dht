@@ -64,6 +64,17 @@ public class BigByteBuffer {
         return getCrossBuffer(length, current, diff).getInt();
     }
 
+    public long getLong() {
+        ByteBuffer current = buffers[bufNum];
+        int length = Long.BYTES;
+        position += length;
+        int diff = current.remaining() - length;
+        if (diff >= 0) {
+            return current.getLong();
+        }
+        return getCrossBuffer(length, current, diff).getLong();
+    }
+
     private ByteBuffer getCrossBuffer(int length, ByteBuffer current, int diff) {
         ByteBuffer buffer = ByteBuffer.allocate(length);
         int bound = Math.min(current.remaining(), length);

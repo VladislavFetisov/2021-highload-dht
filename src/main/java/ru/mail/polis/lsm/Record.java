@@ -24,18 +24,30 @@ public class Record {
 
     private final ByteBuffer key;
     private final ByteBuffer value;
+    private final long createdTime;
 
-    Record(ByteBuffer key, @Nullable ByteBuffer value) {
+    Record(ByteBuffer key, @Nullable ByteBuffer value, long createdTime) {
         this.key = key.asReadOnlyBuffer();
         this.value = value == null ? null : value.asReadOnlyBuffer();
+        this.createdTime = createdTime;
     }
 
     public static Record of(ByteBuffer key, ByteBuffer value) {
-        return new Record(key.asReadOnlyBuffer(), value.asReadOnlyBuffer());
+        long createdTime = System.currentTimeMillis();
+        return new Record(key.asReadOnlyBuffer(), value.asReadOnlyBuffer(), createdTime);
+    }
+
+    public static Record of(ByteBuffer key, ByteBuffer value, long createdTime) {
+        return new Record(key.asReadOnlyBuffer(), value.asReadOnlyBuffer(), createdTime);
     }
 
     public static Record tombstone(ByteBuffer key) {
-        return new Record(key, null);
+        long createdTime = System.currentTimeMillis();
+        return new Record(key, null, createdTime);
+    }
+
+    public static Record tombstone(ByteBuffer key, long createdTime) {
+        return new Record(key, null, createdTime);
     }
 
     public ByteBuffer getKey() {
@@ -58,4 +70,7 @@ public class Record {
         return value == null ? 0 : value.remaining();
     }
 
+    public long getCreatedTime() {
+        return createdTime;
+    }
 }

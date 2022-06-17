@@ -64,11 +64,26 @@ public class LsmDAO implements DAO {
     @Override
     public Iterator<Record> range(@Nullable ByteBuffer fromKey, @Nullable ByteBuffer toKey) {
         Storage localStorage = this.storage;
+        Iterators.PeekingIterator<Record> result = getRange(fromKey, toKey, localStorage);
+        return Iterators.filteredResult(result);
+    }
+
+    @Override
+    public Record get(ByteBuffer key) {
+        Storage localStorage = this.storage;
+        ByteBuffer nextKey = DAO.nextKey(key);
+        Iterators.PeekingIterator<Record> range = getRange(key, nextKey, localStorage);
+        if (!range.hasNext()) {
+            return null;
+        }
+        return range.next();
+    }
+
+    private Iterators.PeekingIterator<Record> getRange(ByteBuffer fromKey, ByteBuffer toKey, Storage localStorage) {
         Iterator<Record> memRange = map(fromKey, toKey, localStorage.memTable);
         Iterator<Record> readOnly = map(fromKey, toKey, localStorage.readOnlyMemTable);
         Iterator<Record> ssTablesRange = ssTablesRange(fromKey, toKey, localStorage.ssTables);
-        Iterators.PeekingIterator<Record> result = Iterators.mergeList(List.of(ssTablesRange, readOnly, memRange));
-        return Iterators.filteredResult(result);
+        return Iterators.mergeList(List.of(ssTablesRange, readOnly, memRange));
     }
 
     @Override

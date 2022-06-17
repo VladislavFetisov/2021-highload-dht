@@ -20,10 +20,6 @@ public class Task implements Runnable {
         this.session = session;
     }
 
-    private void reject() throws IOException {
-        session.sendResponse(new Response(Response.SERVICE_UNAVAILABLE, MESSAGE_BODY));
-    }
-
     @Override
     public void run() {
         runnable.run();
@@ -35,10 +31,14 @@ public class Task implements Runnable {
         public void rejectedExecution(Runnable runnable, ThreadPoolExecutor threadPoolExecutor) {
             Task task = (Task) runnable;
             try {
-                task.reject();
+                reject(task.session);
             } catch (IOException e) {
                 logger.error("Failed to properly rejected task", e);
             }
+        }
+
+        private void reject(HttpSession session) throws IOException {
+            session.sendResponse(new Response(Response.SERVICE_UNAVAILABLE, MESSAGE_BODY));
         }
     }
 }

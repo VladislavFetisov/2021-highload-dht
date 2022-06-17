@@ -119,10 +119,11 @@ public class SSTable {
                 }
                 ByteBuffer key = read(recordsBuffer);
                 ByteBuffer value = read(recordsBuffer);
+                long createdTime = recordsBuffer.getLong();
                 if (value == null) {
-                    return Record.tombstone(key);
+                    return Record.tombstone(key, createdTime);
                 }
-                return Record.of(key, value);
+                return Record.of(key, value,createdTime);
             }
         };
     }
@@ -150,6 +151,7 @@ public class SSTable {
                 Record record = records.next();
                 writeLong(tableChannel.position(), offsetsChannel, forLength);
                 writeRecord(forLength, tableChannel, record);
+                writeLong(record.getCreatedTime(), tableChannel, forLength);
             }
             tableChannel.force(false);
             offsetsChannel.force(false);
