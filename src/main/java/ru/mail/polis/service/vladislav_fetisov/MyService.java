@@ -8,7 +8,7 @@ import org.slf4j.LoggerFactory;
 import ru.mail.polis.lsm.DAO;
 import ru.mail.polis.lsm.Record;
 import ru.mail.polis.service.Service;
-import ru.mail.polis.service.vladislav_fetisov.replication.NoReplicaAvailableException;
+import ru.mail.polis.service.vladislav_fetisov.replication.NoEnoughReplicaAvailableException;
 import ru.mail.polis.service.vladislav_fetisov.replication.ReplicasManager;
 import ru.mail.polis.service.vladislav_fetisov.topology.Topology;
 
@@ -67,7 +67,7 @@ public class MyService extends HttpServer implements Service {
         } catch (IllegalArgumentException e) {
             logger.error("", e);
             session.sendResponse(new Response(Response.BAD_REQUEST, Response.EMPTY));
-        } catch (NoReplicaAvailableException e) {
+        } catch (NoEnoughReplicaAvailableException e) {
             logger.error("", e);
             session.sendResponse(new Response(Response.GATEWAY_TIMEOUT, Response.EMPTY));
         } catch (Exception e) {
@@ -116,7 +116,7 @@ public class MyService extends HttpServer implements Service {
                 } catch (PoolException | IOException | HttpException e) {
                     logger.error("Response from partition on port: " + port, e);
                     if ((from - ++i) < ack) {
-                        throw new NoReplicaAvailableException();
+                        throw new NoEnoughReplicaAvailableException();
                     }
                     indexOfPort++;
                 }
