@@ -1,7 +1,6 @@
 package ru.mail.polis.service.vladislav_fetisov;
 
 import one.nio.http.*;
-import one.nio.pool.PoolException;
 import one.nio.util.Utf8;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,7 +19,6 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 public class MyService extends HttpServer implements Service {
-    public static final int TIMEOUT_MILLIS = 100;
     public static final String V_0_REPLICATION = "/v0/replication";
     private static final String TIME_HEADER = "Time: ";
     private static final int NOT_FOUND = 404;
@@ -97,30 +95,13 @@ public class MyService extends HttpServer implements Service {
             return new Response(Response.BAD_REQUEST, Response.EMPTY);
         }
         ReplicasManager replicasManager = ReplicasManager.parseReplicas(replicas, topology);
-        int from = replicasManager.getFrom();
 
         int port = topology.findPort(Utils.getHash(id));
-
         int indexOfPort = topology.indexOfSortedPort(port);
         int indexOfOurPort = topology.indexOfSortedPort(this.port);
-        int[] sortedPorts = topology.getSortedPorts();
-        int rightBoundIndex = (indexOfPort + from - 1) % sortedPorts.length;
-        if (!ReplicasManager.nodeIsReplica(indexOfPort, indexOfOurPort, rightBoundIndex)) {
-            int ack = replicasManager.getAck();
-            int currentPort;
-            int i = 0;
-            while (true) {
-                currentPort = sortedPorts[indexOfPort];
-                try {
-                    return topology.getClientByPort(currentPort).invoke(request, TIMEOUT_MILLIS);
-                } catch (PoolException | IOException | HttpException e) {
-                    logger.error("Response from partition on port: " + port, e);
-                    if ((from - ++i) < ack) {
-                        throw new NoEnoughReplicaAvailableException();
-                    }
-                    indexOfPort++;
-                }
-            }
+
+        if (!replicasManager.currentNodeIsReplica(indexOfPort, indexOfOurPort)) {
+            return replicasManager.sendToAvailableReplica(request, indexOfPort);
         }
         Response[] responses = replicasManager.processRequestWithReplication(request, id, indexOfPort, indexOfOurPort);
         if (responses.length == 0) {

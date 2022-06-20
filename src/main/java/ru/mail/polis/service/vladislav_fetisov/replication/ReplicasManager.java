@@ -15,9 +15,11 @@ import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
-import static ru.mail.polis.service.vladislav_fetisov.MyService.*;
+import static ru.mail.polis.service.vladislav_fetisov.MyService.V_0_REPLICATION;
+import static ru.mail.polis.service.vladislav_fetisov.MyService.logger;
 
 public class ReplicasManager {
+    public static final int TIMEOUT_MILLIS = 100;
     private final int ack;
     private final int from;
     private final Topology topology;
@@ -46,11 +48,30 @@ public class ReplicasManager {
         return new ReplicasManager(ack, from, topology);
     }
 
-    public static boolean nodeIsReplica(int indexOfPort, int indexOfOurPort, int rightBoundIndex) {
+    public boolean currentNodeIsReplica(int indexOfPort, int indexOfOurPort) {
+        int rightBoundIndex = (indexOfPort + from - 1) % topology.getSortedPorts().length;
         if (rightBoundIndex < indexOfPort) {
             return indexOfOurPort >= indexOfPort || indexOfOurPort <= rightBoundIndex;
         } else {
             return indexOfOurPort >= indexOfPort && indexOfOurPort <= rightBoundIndex;
+        }
+    }
+
+    public Response sendToAvailableReplica(Request request, int indexOfPort) throws InterruptedException {
+        int[] sortedPorts = topology.getSortedPorts();
+        int currentPort;
+        int i = 0;
+        while (true) {
+            currentPort = sortedPorts[indexOfPort];
+            try {
+                return topology.getClientByPort(currentPort).invoke(request, TIMEOUT_MILLIS);
+            } catch (PoolException | IOException | HttpException e) {
+                logger.error("Response from partition on port: " + currentPort, e);
+                if ((from - ++i) < ack) {
+                    throw new NoEnoughReplicaAvailableException();
+                }
+                indexOfPort++;
+            }
         }
     }
 
@@ -123,14 +144,6 @@ public class ReplicasManager {
             });
         }
         return responsesWithSync;
-    }
-
-    public int getFrom() {
-        return from;
-    }
-
-    public int getAck() {
-        return ack;
     }
 
     private static class ResponsesWithSync {
