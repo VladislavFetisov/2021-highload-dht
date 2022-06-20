@@ -100,7 +100,7 @@ public class MyService extends HttpServer implements Service {
         ReplicasManager replicasManager = ReplicasManager.parseReplicas(replicas, topology, indexOfPort, indexOfOurPort);
 
         if (!replicasManager.currentNodeIsReplica()) {
-            return replicasManager.sendToAvailableReplica(request, indexOfPort);
+            return replicasManager.sendToAvailableReplica(request);
         }
         Response[] responses = replicasManager.processRequestWithReplication(request, id);
         if (responses.length == 0) {
