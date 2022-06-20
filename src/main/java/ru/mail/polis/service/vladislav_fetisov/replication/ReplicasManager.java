@@ -63,20 +63,19 @@ public class ReplicasManager {
         }
     }
 
-    public Response sendToAvailableReplica(Request request, int indexOfPort) throws InterruptedException {
+    public Response sendToAvailableReplica(Request request) throws InterruptedException {
         int[] sortedPorts = topology.getSortedPorts();
-        int currentPort;
+        int currentIndex = indexOfPort;
         int i = 0;
         while (true) {
-            currentPort = sortedPorts[indexOfPort];
             try {
-                return topology.getClientByPort(currentPort).invoke(request, TIMEOUT_MILLIS);//FIXME not async
+                return topology.getClientByPort(sortedPorts[currentIndex]).invoke(request, TIMEOUT_MILLIS);
             } catch (PoolException | IOException | HttpException e) {
-                logger.error("Response from partition on port: " + currentPort, e);
+                logger.error("Response from partition on port: " + sortedPorts[currentIndex], e);
                 if ((from - ++i) < ack) {
                     throw new NoEnoughReplicaAvailableException();
                 }
-                indexOfPort++;
+                currentIndex++;
             }
         }
     }
