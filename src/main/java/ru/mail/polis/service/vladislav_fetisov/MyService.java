@@ -2,43 +2,37 @@ package ru.mail.polis.service.vladislav_fetisov;
 
 import one.nio.http.*;
 import one.nio.pool.PoolException;
-import one.nio.util.Hash;
 import one.nio.util.Utf8;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import ru.mail.polis.lsm.DAO;
 import ru.mail.polis.lsm.Record;
 import ru.mail.polis.service.Service;
-import ru.mail.polis.service.vladislav_fetisov.replication.PartitionNotAvailableException;
-import ru.mail.polis.service.vladislav_fetisov.replication.Replicas;
+import ru.mail.polis.service.vladislav_fetisov.replication.NoReplicaAvailableException;
+import ru.mail.polis.service.vladislav_fetisov.replication.ReplicasManager;
 import ru.mail.polis.service.vladislav_fetisov.topology.Topology;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
-import java.util.Arrays;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 public class MyService extends HttpServer implements Service {
-    private static final int TIMEOUT_MILLIS = 20000;
+    public static final int TIMEOUT_MILLIS = 100;
     public static final String V_0_REPLICATION = "/v0/replication";
     private static final String TIME_HEADER = "Time: ";
     private static final int NOT_FOUND = 404;
     private final DAO dao;
     private final Topology topology;
-    private final ThreadPoolExecutor service;
-    private final ExecutorService replicaExecutor = Executors.newFixedThreadPool(8);
+    private final ThreadPoolExecutor service = newThreadPool(8, port);
     public static final Logger logger = LoggerFactory.getLogger(MyService.class);
 
     public MyService(int port, DAO dao, Topology topology) throws IOException {
         super(Utils.from(port));
         this.dao = dao;
         this.topology = topology;
-        service = newThreadPool(8, port);
     }
 
     @Path("/v0/status")
@@ -73,7 +67,7 @@ public class MyService extends HttpServer implements Service {
         } catch (IllegalArgumentException e) {
             logger.error("", e);
             session.sendResponse(new Response(Response.BAD_REQUEST, Response.EMPTY));
-        } catch (PartitionNotAvailableException e) {
+        } catch (NoReplicaAvailableException e) {
             logger.error("", e);
             session.sendResponse(new Response(Response.GATEWAY_TIMEOUT, Response.EMPTY));
         } catch (Exception e) {
@@ -102,21 +96,37 @@ public class MyService extends HttpServer implements Service {
         if (id.isBlank()) {
             return new Response(Response.BAD_REQUEST, Response.EMPTY);
         }
-        int hash = getHash(id);
-        int port = topology.findPort(hash);
-        if (port != this.port) {
-            try {
-                return topology.getClientByPort(port).invoke(request, TIMEOUT_MILLIS);
-            } catch (PoolException | IOException | HttpException e) {
-                logger.error("Response from partition on port: " + port, e);
-                throw new PartitionNotAvailableException();
+        ReplicasManager replicasManager = ReplicasManager.parseReplicas(replicas, topology);
+        int from = replicasManager.getFrom();
+
+        int port = topology.findPort(Utils.getHash(id));
+
+        int indexOfPort = topology.indexOfSortedPort(port);
+        int indexOfOurPort = topology.indexOfSortedPort(this.port);
+        int[] sortedPorts = topology.getSortedPorts();
+        int rightBoundIndex = (indexOfPort + from - 1) % sortedPorts.length;
+        if (!ReplicasManager.nodeIsReplica(indexOfPort, indexOfOurPort, rightBoundIndex)) {
+            int ack = replicasManager.getAck();
+            int currentPort;
+            int i = 0;
+            while (true) {
+                currentPort = sortedPorts[indexOfPort];
+                try {
+                    return topology.getClientByPort(currentPort).invoke(request, TIMEOUT_MILLIS);
+                } catch (PoolException | IOException | HttpException e) {
+                    logger.error("Response from partition on port: " + port, e);
+                    if ((from - ++i) < ack) {
+                        throw new NoReplicaAvailableException();
+                    }
+                    indexOfPort++;
+                }
             }
         }
-        Response[] responses = processRequestWithReplication(request, id, replicas);
+        Response[] responses = replicasManager.processRequestWithReplication(request, id, indexOfPort, indexOfOurPort);
         if (responses.length == 0) {
-            return new Response(Response.GATEWAY_TIMEOUT);
+            return new Response(Response.GATEWAY_TIMEOUT, Response.EMPTY);
         }
-
+        responses[0] = processRequest(request, id);
         switch (request.getMethod()) {
             case Request.METHOD_DELETE:
                 return new Response(Response.ACCEPTED, Response.EMPTY);
@@ -149,93 +159,7 @@ public class MyService extends HttpServer implements Service {
         return new Response(Response.OK, newestResp.getBody());
     }
 
-    private Response[] processRequestWithReplication(
-            Request request, String id, String replicas) throws InterruptedException {
-        int ack;
-        int from;
-        if (replicas == null) {
-            ack = topology.getQuorum();
-            from = topology.getSortedPorts().length;
-        } else {
-            Replicas parsedReplicas = Replicas.parseReplicas(replicas, topology);
-            ack = parsedReplicas.getAck();
-            from = parsedReplicas.getFrom();
-        }
-        ResponsesWithSync responsesWithSync = forwardRequestToReplicas(request, id, ack, from);
-        responsesWithSync.lock.lock();
-        try {
-            Response[] responses = responsesWithSync.responses;
-            while (ack > 1 && responses[responses.length - 1] == null) {
-                long remaining = responsesWithSync.condition.awaitNanos(TIMEOUT_MILLIS * 1_000_000L);
-                if (remaining <= 0) {
-                    return new Response[0];
-                }
-            }
-        } finally {
-            responsesWithSync.lock.unlock();
-        }
-        return responsesWithSync.responses;
-    }
-
-    private ResponsesWithSync forwardRequestToReplicas(Request request, String id, int ack, int from) {
-        int[] sortedPorts = topology.getSortedPorts();
-        int index = Arrays.binarySearch(sortedPorts, this.port);
-
-        String uri = V_0_REPLICATION + "?id=" + id; //TODO move into method
-        Request req = new Request(request.getMethod(), uri, false);
-        byte[] body = request.getBody();
-        if (body != null) {
-            req.addHeader("Content-Length: " + body.length);
-            req.setBody(body);
-        }
-
-        AtomicInteger responseIndex = new AtomicInteger(1);
-        Response[] responses = new Response[ack];
-        ResponsesWithSync responsesWithSync = new ResponsesWithSync(responses);
-        for (int i = index + 1; i < index + 1 + from - 1; i++) {
-            int replicaPort = sortedPorts[i % sortedPorts.length];
-            HttpClient replicaClient = topology.getClientByPort(replicaPort);
-            replicaExecutor.execute(() -> {
-                try {
-                    Response response = replicaClient.invoke(req, TIMEOUT_MILLIS);
-                    int ind = responseIndex.getAndIncrement();
-                    if (ind >= responses.length) {
-                        return;
-                    }
-                    responses[ind] = response;
-                    if (ind == responses.length - 1) {
-                        responsesWithSync.lock.lock();
-                        try {
-                            responsesWithSync.condition.signal();
-                        } finally {
-                            responsesWithSync.lock.unlock();
-                        }
-                    }
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    logger.info("Request was cancelled");
-                } catch (HttpException | IOException | PoolException e) {
-                    logger.error("Response from replica " + replicaClient, e);
-                }
-            });
-        }
-        responses[0] = processRequest(request, id);
-        return responsesWithSync;
-    }
-
-    private static class ResponsesWithSync {
-        private final Response[] responses;
-        private final Lock lock = new ReentrantLock();
-
-        private final Condition condition = lock.newCondition();
-
-        private ResponsesWithSync(Response[] responses) {
-            this.responses = responses;
-        }
-
-    }
-
-    private Response processRequest(Request request, String id) {
+    public Response processRequest(Request request, String id) {
         logger.info("Request method {}, uri {}, body{}", request.getMethodName(), request.getURI(), request.getBody());
         switch (request.getMethod()) {
             case Request.METHOD_GET:
@@ -247,14 +171,6 @@ public class MyService extends HttpServer implements Service {
             default:
                 return new Response(Response.METHOD_NOT_ALLOWED);
         }
-    }
-
-    private int getHash(String id) {
-        int hash = Hash.murmur3(id);
-        if (hash == Integer.MIN_VALUE) {
-            return 0;
-        }
-        return Math.abs(hash);
     }
 
     @Override

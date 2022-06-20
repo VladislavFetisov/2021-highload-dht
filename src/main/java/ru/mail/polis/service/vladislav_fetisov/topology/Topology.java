@@ -5,10 +5,7 @@ import one.nio.net.ConnectionString;
 import ru.mail.polis.service.vladislav_fetisov.Utils;
 
 import java.time.Duration;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.stream.Collectors;
 
 public class Topology {
@@ -62,6 +59,10 @@ public class Topology {
 
     public HttpClient getClientByPort(int port) {
         return portsToClients.get(port);
+    }
+
+    public int indexOfSortedPort(int port) {
+        return Arrays.binarySearch(sortedPorts, port);
     }
 
     private static int binarySearch(VNode[] vNodes, long hash) {
