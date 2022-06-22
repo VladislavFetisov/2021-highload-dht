@@ -1,7 +1,5 @@
 package ru.mail.polis.service.vladislav_fetisov.topology;
 
-import one.nio.http.HttpClient;
-import one.nio.net.ConnectionString;
 import ru.mail.polis.service.vladislav_fetisov.Utils;
 
 import java.time.Duration;
@@ -9,23 +7,20 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 public class Topology {
-    private static final Duration TIMEOUT = Duration.ofSeconds(1);
     private static final int VNODES_COUNT = 8;
+    public static final Duration TIMEOUT = Duration.ofMillis(500);
     private final VNode[] vNodes;
-    private final Map<Integer, HttpClient> portsToClients;
+    private final Map<Integer, String> portsToHosts;
+    private final java.net.http.HttpClient client;
     private final int[] sortedPorts;
-
-    public int[] getSortedPorts() {
-        return sortedPorts;
-    }
 
     private final List<Integer> shuffledPorts;
 
     public Topology(Set<String> endpoints, Range range) {
         vNodes = VNode.getAllVNodes(endpoints.size(), VNODES_COUNT, range);
-        portsToClients = portsToClients(endpoints);
-        shuffledPorts = VNode.distributeVNodes(vNodes.length, portsToClients.keySet());
-        List<Integer> list = portsToClients
+        portsToHosts = portsToHosts(endpoints);
+        shuffledPorts = VNode.distributeVNodes(vNodes.length, portsToHosts.keySet());
+        List<Integer> list = portsToHosts
                 .keySet()
                 .stream()
                 .sorted()
@@ -34,15 +29,17 @@ public class Topology {
         for (int i = 0; i < list.size(); i++) {
             sortedPorts[i] = list.get(i);
         }
+        client = java.net.http.HttpClient
+                .newBuilder()
+                .connectTimeout(TIMEOUT)
+                .build();
     }
 
-    private static Map<Integer, HttpClient> portsToClients(Set<String> topology) {
-        Map<Integer, HttpClient> res = new HashMap<>(topology.size());
-        for (String endpoint : topology) {
-            res.put(Utils.getPort(endpoint),
-                    new HttpClient(new ConnectionString(endpoint + "?timeout=" + TIMEOUT.toMillis())));
-        }
-        return res;
+    private static Map<Integer, String> portsToHosts(Set<String> topology) {
+        return topology
+                .stream()
+                .collect(Collectors.toMap(Utils::getPort, s -> s, (a, b) -> b, () -> new HashMap<>(topology.size())));
+
     }
 
     public int findPort(long idHashCode) {
@@ -57,8 +54,8 @@ public class Topology {
         return shuffledPorts.get(l);
     }
 
-    public HttpClient getClientByPort(int port) {
-        return portsToClients.get(port);
+    public String getHostByPort(int port) {
+        return portsToHosts.get(port);
     }
 
     public int indexOfSortedPort(int port) {
@@ -94,5 +91,14 @@ public class Topology {
 
     public int getQuorum() {
         return (sortedPorts.length / 2) + 1;
+    }
+
+
+    public int[] getSortedPorts() {
+        return sortedPorts;
+    }
+
+    public java.net.http.HttpClient getClient() {
+        return client;
     }
 }
