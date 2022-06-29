@@ -2,6 +2,7 @@ package ru.mail.polis.service.vladislav_fetisov.topology;
 
 import ru.mail.polis.service.vladislav_fetisov.Utils;
 
+import java.net.http.HttpClient;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.ForkJoinPool;
@@ -37,6 +38,7 @@ public class Topology {
                 true);
         client = java.net.http.HttpClient
                 .newBuilder()
+                .version(HttpClient.Version.HTTP_1_1)
                 .connectTimeout(TIMEOUT)
                 .executor(pool)
                 .build();
