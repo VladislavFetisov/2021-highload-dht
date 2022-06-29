@@ -4,6 +4,7 @@ import ru.mail.polis.service.vladislav_fetisov.Utils;
 
 import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.ForkJoinPool;
 import java.util.stream.Collectors;
 
 public class Topology {
@@ -29,9 +30,15 @@ public class Topology {
         for (int i = 0; i < list.size(); i++) {
             sortedPorts[i] = list.get(i);
         }
+        ForkJoinPool pool = new ForkJoinPool(
+                Runtime.getRuntime().availableProcessors(),
+                ForkJoinPool.defaultForkJoinWorkerThreadFactory,
+                null,
+                true);
         client = java.net.http.HttpClient
                 .newBuilder()
                 .connectTimeout(TIMEOUT)
+                .executor(pool)
                 .build();
     }
 

@@ -156,7 +156,7 @@ public class MyService extends HttpServer implements Service {
             return;
         }
         CompletableFuture
-                .delayedExecutor(EXECUTOR_TIMEOUT, TimeUnit.MILLISECONDS)
+                .delayedExecutor(EXECUTOR_TIMEOUT, TimeUnit.MILLISECONDS)//FIXME
                 .execute(() -> {
                     if (!timeout.compareAndSet(false, true)) {
                         return;
@@ -200,7 +200,7 @@ public class MyService extends HttpServer implements Service {
                             return;
                         }
                         sendResponse(request, localResponse, session, responses);
-                    });
+                    }, topology.getClient().executor().get());
         }
         return timeout;
     }
@@ -263,7 +263,6 @@ public class MyService extends HttpServer implements Service {
     }
 
     public Response processRequest(Request request, String id) {
-        logger.info("Request method {}, uri {}, body{}", request.getMethodName(), request.getURI(), request.getBody());
         switch (request.getMethod()) {
             case Request.METHOD_GET:
                 return get(id);
