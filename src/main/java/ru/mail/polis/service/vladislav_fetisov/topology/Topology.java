@@ -31,14 +31,10 @@ public class Topology {
         for (int i = 0; i < list.size(); i++) {
             sortedPorts[i] = list.get(i);
         }
-        ForkJoinPool pool = new ForkJoinPool(
-                Runtime.getRuntime().availableProcessors(),
-                ForkJoinPool.defaultForkJoinWorkerThreadFactory,
-                null,
-                true);
+        ForkJoinPool pool = new ForkJoinPool();
         client = java.net.http.HttpClient
                 .newBuilder()
-                .version(HttpClient.Version.HTTP_1_1)
+                .version(HttpClient.Version.HTTP_2)
                 .connectTimeout(TIMEOUT)
                 .executor(pool)
                 .build();
