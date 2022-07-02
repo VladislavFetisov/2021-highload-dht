@@ -34,7 +34,7 @@ public class Topology {
         ForkJoinPool pool = new ForkJoinPool();
         client = java.net.http.HttpClient
                 .newBuilder()
-                .version(HttpClient.Version.HTTP_2)
+                .version(HttpClient.Version.HTTP_1_1)
                 .connectTimeout(TIMEOUT)
                 .executor(pool)
                 .build();

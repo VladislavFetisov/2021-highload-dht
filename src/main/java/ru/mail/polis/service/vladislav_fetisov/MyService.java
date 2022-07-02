@@ -1,6 +1,8 @@
 package ru.mail.polis.service.vladislav_fetisov;
 
 import one.nio.http.*;
+import one.nio.net.Socket;
+import one.nio.server.RejectedSessionException;
 import one.nio.util.Utf8;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -16,6 +18,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
@@ -24,12 +27,20 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
+
+import static ru.mail.polis.service.vladislav_fetisov.Utils.writeEntry;
+import static ru.mail.polis.service.vladislav_fetisov.Utils.writeToArray;
 
 public class MyService extends HttpServer implements Service {
     public static final String ID_PARAM = "?id=";
     public static final String V_0_REPLICATION = "/v0/replication";
     public static final String V_0_ENTITY = "/v0/entity";
     private static final String TIME_HEADER = "time";
+    private static final String CRLF = "\r\n";
+    private static final byte[] bytesCRLF = Utf8.toBytes(CRLF);
+    public static final byte[] bytesLF = Utf8.toBytes("\n");
+    private static final byte[] EMPTY_CHUNK = Utf8.toBytes("0" + CRLF + CRLF);
     private static final int NOT_FOUND = 404;
     private static final long EXECUTOR_TIMEOUT = Topology.TIMEOUT.toMillis();
     private final DAO dao;
@@ -79,6 +90,60 @@ public class MyService extends HttpServer implements Service {
             }
         };
         service.execute(new Task(runnable, session));
+    }
+
+    @Path("/v0/entities")
+    @RequestMethod(Request.METHOD_GET)
+    public void entities(
+            HttpSession session,
+            @Param(value = "start", required = true) String start,
+            @Param(value = "end") String end) {
+        MyHttpSession myHttpSession = (MyHttpSession) session;
+        Runnable runnable = () -> {
+            try {
+                if (start.isBlank()) {
+                    session.sendResponse(new Response(Response.BAD_REQUEST, Response.EMPTY));
+                    return;
+                }
+                Response response = new Response(Response.OK);
+                response.addHeader("Transfer-Encoding: chunked");
+                Iterator<Record> iterator = dao.range(ByteBuffer.wrap(Utf8.toBytes(start)),
+                        (end == null) ? null : ByteBuffer.wrap(Utf8.toBytes(end)));
+                myHttpSession.sendResponseWithSupplier(response, new Supplier<>() {
+                    boolean empty = false;
+
+                    @Override
+                    public byte[] get() {
+                        if (empty) {
+                            return new byte[0];
+                        }
+                        int pos = 0;
+                        byte[] res;
+                        if (iterator.hasNext()) {
+                            Record record = iterator.next();
+                            int size = record.getKeySize() + record.getValueSize() + bytesLF.length;
+                            byte[] chunkLength = Utf8.toBytes(Integer.toHexString(size));
+                            res = new byte[chunkLength.length + bytesCRLF.length * 2 + size];
+                            pos = writeToArray(chunkLength, res, pos, chunkLength.length);
+                            pos = writeToArray(bytesCRLF, res, pos, bytesCRLF.length);
+                            pos = writeEntry(pos, record, res);
+                            writeToArray(bytesCRLF, res, pos, bytesCRLF.length);
+                            return res;
+                        }
+                        empty = true;
+                        return EMPTY_CHUNK;
+                    }
+                });
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        };
+        service.execute(new Task(runnable, myHttpSession));
+    }
+
+    @Override
+    public HttpSession createSession(Socket socket) throws RejectedSessionException {
+        return new MyHttpSession(socket, this);
     }
 
     private void replicaRequest(Request request, HttpSession session, String id, String replicas) throws IOException {
@@ -156,7 +221,7 @@ public class MyService extends HttpServer implements Service {
             return;
         }
         CompletableFuture
-                .delayedExecutor(EXECUTOR_TIMEOUT, TimeUnit.MILLISECONDS)//FIXME
+                .delayedExecutor(EXECUTOR_TIMEOUT, TimeUnit.MILLISECONDS)
                 .execute(() -> {
                     if (!timeout.compareAndSet(false, true)) {
                         return;
@@ -280,6 +345,7 @@ public class MyService extends HttpServer implements Service {
         Response response = new Response(Response.BAD_REQUEST, Response.EMPTY);
         session.sendResponse(response);
     }
+
 
     private Response put(String id, byte[] body) {
         boolean success = dao.upsert(Record.of(ByteBuffer.wrap(Utf8.toBytes(id)), ByteBuffer.wrap(body)));
